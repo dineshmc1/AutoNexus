@@ -392,6 +392,11 @@ def run_single_dataset_pipeline(X, y, problem_type, store, encoder, did="local",
             except Exception as nb_err:
                 print(f"  [Notebook Generator] Failed: {nb_err}")
 
+            return {
+                "score": final_accuracy if 'final_accuracy' in locals() else best_params.get("utility_score", 0),
+                "models_evaluated": models_actually_trained if 'models_actually_trained' in locals() else 1,
+                "eval_metrics": eval_metrics if 'eval_metrics' in locals() else {}
+            }
             
     elif paradigm_decision == "AutoDL":
         print("\n🧠 Executing AutoDL NAS Pipeline...")
@@ -658,10 +663,15 @@ def run_single_dataset_pipeline(X, y, problem_type, store, encoder, did="local",
             except Exception as nb_err:
                 print(f"  [Notebook Generator] Failed: {nb_err}")
 
+            return {
+                "score": final_acc if 'final_acc' in locals() and final_acc is not None else float(nas_study.best_value) if 'nas_study' in locals() else 0.0,
+                "models_evaluated": len(nas_study.trials) if 'nas_study' in locals() else 10
+            }
             
         except Exception as e:
             print(f"  [AutoDL NAS] Failed: {e}")
             import traceback; traceback.print_exc()
+            return {"score": 0.0, "models_evaluated": 0}
 
 
 def main():

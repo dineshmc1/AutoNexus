@@ -20,3 +20,4 @@ wandb/
 .understand-anything/
 .tmp-dashboard/
 config.json
+/benchmark_suite/datasets/*
