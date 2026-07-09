@@ -93,10 +93,13 @@ def run_hpo(X, y, preprocessor, top_models, memory_hparams, problem_type, datase
             print(f"[HPO] Skipping {model_name} (no search space defined).")
             continue
             
+        # 🚀 USE A PRUNER TO SAVE TIME 🚀
+        pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=2)
+        
         study = optuna.create_study(
             direction='maximize', 
             study_name=f"hpo_{model_name}_{dataset_id}",
-            pruner=optuna.pruners.MedianPruner()
+            pruner=pruner
         )
         
         warm_start_used = False
@@ -120,12 +123,15 @@ def run_hpo(X, y, preprocessor, top_models, memory_hparams, problem_type, datase
             metric_name=f"hpo/{model_name}/utility_score"
         )
         
-        print(f"  [HPO] Running 10 Optuna trials for {model_name}...")
+        # Reduce trials from 100 to 30-50. With a Pruner, 30 trials is often better than 100 random ones.
+        n_trials = 30 if problem_type == 'classification' else 20
+        
+        print(f"  [HPO] Running {n_trials} Optuna trials for {model_name}...")
         study.optimize(
             lambda trial: objective(trial, X, y, preprocessor, model_name, problem_type, w1, w2, w3),
-            n_trials=100, # Keep to 10 for feasibility in local testing
+            n_trials=n_trials,
             callbacks=[wandb_callback],
-            show_progress_bar=False,
+            show_progress_bar=True,
             catch=(Exception,)
         )
         

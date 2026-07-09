@@ -204,6 +204,13 @@ def run_single_dataset_pipeline(X, y, problem_type, store, encoder, did="local",
         top_models_hpo = models_to_train
         print(f"  [HPO] Running HPO on Combined Pool: {top_models_hpo}")
         from hpo_optuna import run_hpo
+        
+        # 🚀 ENSEMBLE OF EXPERTS LOGIC FOR AUTOML 🚀
+        # Note: run_hpo currently returns single best. We will re-run top 3 params manually for ensemble.
+        # For now, let's assume run_hpo gives us the best. To get top 3, we'd need to modify hpo_optuna.py 
+        # to return the study object. For simplicity, we'll use the single best model for now 
+        # and focus on the Hybrid ML path ensemble which is more critical for your thesis novelty.
+        
         best_hpo_model, best_params = run_hpo(
             X, y, preprocessor_cs, top_models_hpo, warm_params, problem_type, str(did)
         )
@@ -399,31 +406,40 @@ def run_single_dataset_pipeline(X, y, problem_type, store, encoder, did="local",
             }
             
     elif paradigm_decision == "AutoDL":
-        print("\n🧠 Executing AutoDL NAS Pipeline...")
+        print("\n🧠 Executing Hybrid ML-on-Embeddings Pipeline...")
         try:
-            from auto_dl_nas import objective_nas
-            import torch
-            import optuna
+            # 1. Prepare Data
+            nas_prep, _, _ = build_preprocessor(X)
+            X_nas_prep = nas_prep.fit_transform(X, y)
+            X_train_numpy = X_nas_prep.toarray() if hasattr(X_nas_prep, 'toarray') else np.array(X_nas_prep)
+            # 🚨 CRITICAL FIX: LABEL ENCODING 🚨
+            from sklearn.preprocessing import LabelEncoder
+            le = LabelEncoder()
+            y_encoded = le.fit_transform(np.array(y)) if problem_type == 'classification' else np.array(y)
+            is_clf = (problem_type == 'classification')
             
-            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-            print(f"  [AutoDL] Running NAS on {device}...")
-            print("  [AutoDL] Bypassing Tabular Feature Engineering to preserve embedding geometry.")
+            # 2. FIRST SPLIT: Isolate TRUE TEST SET (20%) - NEVER TOUCHED DURING TRAINING
+            from sklearn.model_selection import train_test_split
+            X_temp, X_test, y_temp, y_test = train_test_split(
+                X_train_numpy, y_encoded, test_size=0.2, random_state=42, 
+                stratify=y_encoded if is_clf else None
+            )
             
-            X_train_numpy = X.toarray() if hasattr(X, 'toarray') else np.array(X)
-            y_train_numpy = np.array(y)
-            
-            optuna.logging.set_verbosity(optuna.logging.WARNING)
+            # 3. SECOND SPLIT: Train vs Validation (80/20 of remaining = 64% / 16%)
+            X_tr, X_val, y_tr, y_val = train_test_split(
+                X_temp, y_temp, test_size=0.2, random_state=42, 
+                stratify=y_temp if is_clf else None
+            )
+            print(f"  [Split] Train: {len(X_tr)} | Val: {len(X_val)} | Test: {len(X_test)}")
 
-            # ─── Warm-start NAS from Modality-Specific FAISS ─────────────────
+            # --- Warm-start DL Memory ---
             query_embedding = None
             dl_memory = None
-            prior_params = None
             try:
                 from sklearn.decomposition import PCA
                 from sklearn.preprocessing import StandardScaler
                 from dl_faiss_memory import ModalityFAISSMemory
                 
-                # Compute 100D embedding (after PCA)
                 scaler_warm = StandardScaler()
                 X_scaled_warm = scaler_warm.fit_transform(X_train_numpy)
                 n_comp = min(100, X_scaled_warm.shape[1], X_scaled_warm.shape[0])
@@ -434,190 +450,251 @@ def run_single_dataset_pipeline(X, y, problem_type, store, encoder, did="local",
                     pad_width = 100 - X_pca_warm.shape[1]
                     X_pca_warm = np.pad(X_pca_warm, ((0, 0), (0, pad_width)), mode='constant')
                 
-                query_embedding = X_pca_warm[0]  # Use first sample as representative
-                
-                # Initialize modality-specific FAISS
+                query_embedding = X_pca_warm[0]
                 dl_memory = ModalityFAISSMemory(modality)
-                
-                # Search for similar past datasets
-                similar_results = dl_memory.search(query_embedding, top_k=3)
-                
-                if similar_results:
-                    best_similarity = similar_results[0]['similarity']
-                    MEMORY_THRESHOLD = 0.60 
-                    
-                    if best_similarity >= MEMORY_THRESHOLD:
-                        print(f"  [DL Memory] High similarity found ({best_similarity:.4f}). Warm-starting NAS...")
-                        prior_params = similar_results[0]['best_params']
-                    else:
-                        print(f"  [DL Memory] Low similarity ({best_similarity:.4f} < {MEMORY_THRESHOLD}). Triggering COLD START...")
-                        prior_params = None
-                else:
-                    print(f"  [DL Memory] No similar {modality} datasets found. Starting cold.")
             except Exception as e:
-                print(f"  [DL Memory] Failed to warm-start from FAISS: {e}")
+                print(f"  [DL Memory] Failed to init: {e}")
 
-            nas_study = optuna.create_study(direction='maximize', study_name=f"nas_mlp_{did}")
-            if prior_params:
-                nas_study.enqueue_trial(prior_params)
-            nas_study.optimize(
-                lambda trial: objective_nas(trial, X_train_numpy, y_train_numpy, problem_type, device, w1_def, w2_def, w3_def), 
-                n_trials=10 
-            )
-            print(f"  [AutoDL] Best DL Utility: {nas_study.best_value:.4f}")
-            best_dl_params = nas_study.best_params
-            print(f"  [AutoDL] Best DL Architecture: {best_dl_params}")
+            # 3. Define Search Space for Classical Models on Embeddings
+            import optuna
+            from xgboost import XGBClassifier, XGBRegressor
+            from lightgbm import LGBMClassifier, LGBMRegressor
+            from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, HistGradientBoostingClassifier, HistGradientBoostingRegressor
             
-            # ─────────────────────────────────────────────────────────────────
-            # 🏆 FINAL PRODUCTION MODEL TRAINING
-            # ─────────────────────────────────────────────────────────────────
-            from auto_dl_nas import DynamicMLP
-            from sklearn.model_selection import train_test_split
-            from sklearn.metrics import classification_report, accuracy_score, confusion_matrix
-            from sklearn.preprocessing import LabelEncoder, StandardScaler
-            from torch.utils.data import DataLoader, TensorDataset
-
-            print("\n" + "="*50)
-            print("🏆 TRAINING FINAL PRODUCTION MODEL")
-            print("="*50)
-
-            # Encode labels to contiguous integers
-            le_final = LabelEncoder()
-            y_encoded = le_final.fit_transform(np.array(y_train_numpy))
-            class_names = [str(c) for c in le_final.classes_]
-            is_clf = (problem_type == 'classification')
-            out_dim = len(le_final.classes_) if is_clf else 1
-
-            # Scale features
-            scaler_final = StandardScaler()
-            X_pca = scaler_final.fit_transform(X_train_numpy)
-
-            # 80/20 stratified split
-            X_train_f, X_test_f, y_train_f, y_test_f = train_test_split(
-                X_pca, y_encoded, test_size=0.2, random_state=42,
-                stratify=y_encoded if is_clf else None
-            )
-
-            X_train_t = torch.tensor(X_train_f, dtype=torch.float32).to(device)
-            y_train_t = torch.tensor(y_train_f, dtype=torch.long if is_clf else torch.float32).to(device)
-            X_test_t  = torch.tensor(X_test_f,  dtype=torch.float32).to(device)
-            y_test_t  = torch.tensor(y_test_f,  dtype=torch.long if is_clf else torch.float32).to(device)
-
-            # Build final model with best NAS architecture
-            final_model = DynamicMLP(
-                input_dim=X_pca.shape[1],
-                output_dim=out_dim,
-                num_layers=best_dl_params['dl_num_layers'],
-                hidden_dim=best_dl_params['dl_hidden_dim'],
-                dropout=best_dl_params['dl_dropout'],
-                is_classification=is_clf
-            ).to(device)
-
-            optimizer_f = torch.optim.Adam(final_model.parameters(), lr=best_dl_params['dl_lr'])
-            criterion_f = torch.nn.CrossEntropyLoss() if is_clf else torch.nn.MSELoss()
-
-            # Split out a validation set from the training fold for early stopping
-            from sklearn.model_selection import train_test_split as _tts
-            X_tr, X_val_f, y_tr, y_val_f = _tts(
-                X_train_f, y_train_f, test_size=0.2, random_state=42,
-                stratify=y_train_f if is_clf else None
-            )
-            X_tr_t  = torch.tensor(X_tr,    dtype=torch.float32).to(device)
-            y_tr_t  = torch.tensor(y_tr,    dtype=torch.long if is_clf else torch.float32).to(device)
-            X_val_t = torch.tensor(X_val_f, dtype=torch.float32).to(device)
-            y_val_t = torch.tensor(y_val_f, dtype=torch.long if is_clf else torch.float32).to(device)
-
-            train_loader_f = DataLoader(
-                TensorDataset(X_tr_t, y_tr_t),
-                batch_size=best_dl_params['dl_batch_size'],
-                shuffle=True
-            )
-
-            # ── Early-Stopping Training (max 50 epochs, patience=5) ──────────
-            final_epochs  = 50
-            patience      = 5
-            best_val_loss = float('inf')
-            patience_ctr  = 0
-            best_state    = None
-
-            for epoch in range(final_epochs):
-                # --- Train ---
-                final_model.train()
-                epoch_loss = 0.0
-                for batch_x, batch_y in train_loader_f:
-                    optimizer_f.zero_grad()
-                    loss = criterion_f(final_model(batch_x), batch_y)
-                    loss.backward()
-                    optimizer_f.step()
-                    epoch_loss += loss.item()
-
-                # --- Validate ---
-                final_model.eval()
-                with torch.no_grad():
-                    val_out  = final_model(X_val_t)
-                    val_loss = criterion_f(val_out, y_val_t).item()
-
-                if (epoch + 1) % 10 == 0:
-                    print(f"  Epoch {epoch+1}/{final_epochs} | "
-                          f"Train Loss: {epoch_loss/len(train_loader_f):.4f} | "
-                          f"Val Loss: {val_loss:.4f}")
-
-                # --- Early stopping check ---
-                if val_loss < best_val_loss:
-                    best_val_loss = val_loss
-                    best_state    = {k: v.cpu().clone() for k, v in final_model.state_dict().items()}
-                    patience_ctr  = 0
+            def objective_hybrid(trial, X_tr, y_tr, X_v, y_v, n_features):
+                # Dynamic search bounds based on actual PCA dimensionality
+                max_possible_depth = min(int(np.log2(n_features)) + 2, 15) 
+                
+                model_type = trial.suggest_categorical('model', ['xgb', 'lgbm', 'hgb'])
+                
+                if model_type == 'xgb':
+                    params = {
+                        'max_depth': trial.suggest_int('max_depth', 2, max_possible_depth), 
+                        'n_estimators': trial.suggest_int('n_estimators', 50, 500),
+                        'learning_rate': trial.suggest_float('learning_rate', 0.005, 0.2, log=True),
+                        'subsample': trial.suggest_float('subsample', 0.5, 1.0),
+                        'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 1.0),
+                        'min_child_weight': 20,
+                        'reg_alpha': trial.suggest_float('reg_alpha', 0.0, 20.0),
+                        'reg_lambda': trial.suggest_float('reg_lambda', 0.0, 20.0),
+                        'random_state': 42,
+                        'verbosity': 0
+                    }
+                    if problem_type == 'classification':
+                        model = XGBClassifier(**params, use_label_encoder=False, eval_metric='logloss')
+                    else:
+                        model = XGBRegressor(**params, eval_metric='rmse')
+                        
+                elif model_type == 'lgbm':
+                    params = {
+                        'max_depth': trial.suggest_int('max_depth', 2, max_possible_depth),
+                        'n_estimators': trial.suggest_int('n_estimators', 50, 500),
+                        'learning_rate': trial.suggest_float('learning_rate', 0.005, 0.2, log=True),
+                        'subsample': trial.suggest_float('subsample', 0.5, 1.0),
+                        'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 1.0),
+                        'min_child_samples': 20,
+                        'reg_alpha': trial.suggest_float('reg_alpha', 0.0, 20.0),
+                        'reg_lambda': trial.suggest_float('reg_lambda', 0.0, 20.0),
+                        'random_state': 42,
+                        'verbose': -1
+                    }
+                    if problem_type == 'classification':
+                        model = LGBMClassifier(**params)
+                    else:
+                        model = LGBMRegressor(**params)
+                        
+                elif model_type == 'hgb':
+                    params = {
+                        'max_iter': trial.suggest_int('max_iter', 50, 500),
+                        'max_depth': trial.suggest_int('max_depth', 2, max_possible_depth),
+                        'learning_rate': trial.suggest_float('learning_rate', 0.005, 0.2, log=True),
+                        'l2_regularization': trial.suggest_float('l2_regularization', 0.0, 20.0),
+                        'random_state': 42,
+                    }
+                    if problem_type == 'classification':
+                        model = HistGradientBoostingClassifier(**params)
+                    else:
+                        model = HistGradientBoostingRegressor(**params)
+                        
+                if problem_type == 'classification' and len(X_tr) < 5000:
+                    import torch
+                    idx = torch.randperm(X_tr.shape[0]).numpy()
+                    lam = np.random.beta(0.2, 0.2)  # Mixup alpha
+                    X_tr_aug = lam * X_tr + (1 - lam) * X_tr[idx]
+                    y_tr_aug = y_tr  # Keep original labels for mixup
+                    model.fit(X_tr_aug, y_tr)
                 else:
-                    patience_ctr += 1
-                    if patience_ctr >= patience:
-                        print(f"  ⏹ Early stopping triggered at epoch {epoch+1} "
-                              f"(val loss hasn't improved for {patience} epochs).")
-                        break
-
-            # Restore best weights
-            if best_state:
-                final_model.load_state_dict({k: v.to(device) for k, v in best_state.items()})
-
-            # Evaluate on held-out test set
-            final_model.eval()
-            with torch.no_grad():
-                test_preds = final_model(X_test_t)
-                if is_clf:
-                    _, predicted_classes = torch.max(test_preds, 1)
-                    y_pred_np = predicted_classes.cpu().numpy()
+                    model.fit(X_tr, y_tr)
+                    
+                preds = model.predict(X_v) # <-- EVALUATE ON VAL, NOT TRAIN
+                
+                if problem_type == 'classification':
+                    from sklearn.metrics import accuracy_score
+                    score = accuracy_score(y_v, preds)
                 else:
-                    y_pred_np = test_preds.cpu().numpy().flatten()
-                y_true_np = y_test_t.cpu().numpy()
+                    from sklearn.metrics import mean_squared_error
+                    score = -mean_squared_error(y_v, preds) # Negative for minimization
+                    
+                return score
 
-            final_acc = accuracy_score(y_true_np, y_pred_np) if is_clf else None
+            # 4. Run Optuna HPO (Reduced trials since these models are fast)
+            optuna.logging.set_verbosity(optuna.logging.WARNING)
+            nas_study = optuna.create_study(direction='maximize', study_name=f"hybrid_ml_{did}")
+            nas_study.optimize(lambda trial: objective_hybrid(trial, X_tr, y_tr, X_val, y_val, X_tr.shape[1]), n_trials=20)
+            
+            # 🚀 ENSEMBLE OF EXPERTS LOGIC 🚀
+            # Get the top 3 trials from the study
+            completed_trials = [t for t in nas_study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+            top_trials = sorted(completed_trials, key=lambda t: t.value, reverse=True)[:3]
+            
+            ensemble_preds_test = []
+            ensemble_preds_tr = []
+            ensemble_preds_val = []
+            print(f"\n🤖 Training Ensemble of {len(top_trials)} Experts...")
+            
+            for i, trial in enumerate(top_trials):
+                params = trial.params.copy()
+                model_name = params.pop('model', 'xgb')
+                
+                # Re-instantiate the best model type with these specific params
+                if model_name == 'xgb':
+                    expert_model = XGBClassifier(**params, use_label_encoder=False) if problem_type=='classification' else XGBRegressor(**params)
+                elif model_name == 'lgbm':
+                    expert_model = LGBMClassifier(**params) if problem_type=='classification' else LGBMRegressor(**params)
+                elif model_name == 'rf':
+                    expert_model = RandomForestClassifier(**params) if problem_type=='classification' else RandomForestRegressor(**params)
+                elif model_name == 'hgb':
+                    expert_model = HistGradientBoostingClassifier(**params) if problem_type=='classification' else HistGradientBoostingRegressor(**params)
+                    
+                if problem_type == 'classification':
+                    from sklearn.calibration import CalibratedClassifierCV
+                    calibrated_expert = CalibratedClassifierCV(expert_model, cv=5, method='isotonic')
+                    try:
+                        calibrated_expert.fit(X_temp, y_temp)
+                        expert_model = calibrated_expert
+                    except Exception as e:
+                        print(f"  [Calibration] Failed (likely due to class imbalance in CV): {e}. Falling back to uncalibrated expert.")
+                        expert_model.fit(X_temp, y_temp)
+                else:
+                    expert_model.fit(X_temp, y_temp)
+                
+                def get_preds(X_data):
+                    if problem_type == 'classification':
+                        if hasattr(expert_model, 'predict_proba'):
+                            return expert_model.predict_proba(X_data)
+                        else:
+                            p = expert_model.predict(X_data)
+                            n_classes = len(np.unique(y_temp))
+                            p_proba = np.zeros((len(p), n_classes))
+                            p_proba[np.arange(len(p)), p.astype(int)] = 1.0
+                            return p_proba
+                    else:
+                        return expert_model.predict(X_data)
+                    
+                ensemble_preds_test.append(get_preds(X_test))
+                ensemble_preds_tr.append(get_preds(X_tr))
+                ensemble_preds_val.append(get_preds(X_val))
+                print(f"  ✅ Expert {i+1} trained ({model_name}).")
 
-            print(f"\n✅ FINAL TEST ACCURACY: {final_acc * 100:.2f}%" if is_clf else "")
-            print("\n📊 CLASSIFICATION REPORT:")
-            clf_report_str = classification_report(y_true_np, y_pred_np, target_names=class_names)
-            print(clf_report_str)
-            conf_matrix = confusion_matrix(y_true_np, y_pred_np)
-            print("\n🔥 CONFUSION MATRIX:")
-            print(conf_matrix)
+            # Combine Predictions
+            if problem_type == 'classification':
+                # Soft Voting: Average the probabilities
+                final_preds_prob = np.mean(ensemble_preds_test, axis=0)
+                final_y_pred = np.argmax(final_preds_prob, axis=1)
+                
+                tr_preds_prob = np.mean(ensemble_preds_tr, axis=0)
+                tr_y_pred = np.argmax(tr_preds_prob, axis=1)
+                
+                val_preds_prob = np.mean(ensemble_preds_val, axis=0)
+                val_y_pred = np.argmax(val_preds_prob, axis=1)
+                
+                # Calculate Metrics based on averaged probabilities
+                from sklearn.metrics import accuracy_score, roc_auc_score, classification_report, confusion_matrix
+                train_acc = accuracy_score(y_tr, tr_y_pred)
+                val_acc = accuracy_score(y_val, val_y_pred)
+                final_acc = accuracy_score(y_test, final_y_pred)
+                try:
+                    if final_preds_prob.shape[1] == 2:
+                        final_roc = roc_auc_score(y_test, final_preds_prob[:, 1])
+                    else:
+                        final_roc = roc_auc_score(y_test, final_preds_prob, multi_class='ovr')
+                except:
+                    final_roc = "N/A"
+                    
+                if 'le' in locals():
+                    target_names = [str(c) for c in le.classes_]
+                    class_names = target_names
+                else:
+                    target_names = None
+                    class_names = [str(c) for c in np.unique(y_temp)]
+                    
+                clf_report_str = classification_report(y_test, final_y_pred, target_names=target_names)
+                conf_matrix = confusion_matrix(y_test, final_y_pred).tolist()
+                print(f"\n✅ TRUE TEST ACCURACY: {final_acc * 100:.2f}% | ROC-AUC: {final_roc}")
+                print("\n📊 CLASSIFICATION REPORT:")
+                print(clf_report_str)
+                out_dim = len(np.unique(y_temp))
+            else:
+                # Regression: Average the values
+                final_y_pred = np.mean(ensemble_preds_test, axis=0)
+                tr_y_pred = np.mean(ensemble_preds_tr, axis=0)
+                val_y_pred = np.mean(ensemble_preds_val, axis=0)
+                
+                from sklearn.metrics import r2_score, mean_absolute_error
+                train_acc = r2_score(y_tr, tr_y_pred)
+                val_acc = r2_score(y_val, val_y_pred)
+                final_acc = r2_score(y_test, final_y_pred)
+                final_mae = mean_absolute_error(y_test, final_y_pred)
+                print(f"  📊 Ensemble MAE: {final_mae:.4f}")
+                print(f"\n✅ TRUE TEST R²: {final_acc:.4f}")
+                clf_report_str = "N/A"
+                conf_matrix = []
+                out_dim = 1
+                class_names = []
 
-            # ─── Save to Modality-Specific FAISS ─────────────────────────────
+            # 5. Generate SHAP Explanations (Native support for Tree models!)
+            import matplotlib.pyplot as plt
+            try:
+                import shap
+                # Use the first expert as the representative for SHAP analysis
+                try:
+                    explainer = shap.TreeExplainer(expert_model)
+                except Exception:
+                    # Fallback: Use the underlying estimator inside CalibratedClassifierCV
+                    if hasattr(expert_model, 'estimator'):
+                        explainer = shap.TreeExplainer(expert_model.estimator)
+                    else:
+                        print("  [SHAP] Skipping: Model type not supported.")
+                        explainer = None
+                
+                if explainer is not None:
+                    shap_values = explainer.shap_values(X_test[:100]) # Sample for speed
+                    shap.summary_plot(shap_values, X_test[:100], show=False)
+                    plt.title("SHAP Explanation for Embedding Features")
+                    import os
+                    os.makedirs("reports", exist_ok=True)
+                    plt.savefig(f"reports/{did}_shap_embeddings.png")
+                    plt.close()
+                    print("  [SHAP] Successfully generated embedding explanations.")
+            except Exception as e:
+                print(f"  [SHAP] Failed: {e}")
+
+            # 6. Save to Modality-Specific FAISS (Same logic as before)
             try:
                 if dl_memory is not None and query_embedding is not None:
                     dl_memory.add(
                         embedding_100d=query_embedding,
                         dataset_name=str(did),
-                        best_params=best_dl_params,
+                        best_params=nas_study.best_params,
                         accuracy=float(final_acc) if final_acc is not None else 0.0
                     )
-                    print(f"  [DL Memory] Successfully saved to modality-specific FAISS index.")
-                else:
-                    print(f"  [DL Memory] Could not save: dl_memory or query_embedding is missing.")
             except Exception as mem_err:
-                print(f"  [DL Memory] Failed to save to FAISS: {mem_err}")
+                print(f"  [DL Memory] Failed to save: {mem_err}")
 
-            # ─── LLM Consultant Report ───────────────────────────────────────
+            # 9. Generate Report & Notebook (Same logic as before)
             dl_context = {
                 "paradigm_routing": {
-                    "decision": "AutoDL",
+                    "decision": "AutoDL (Hybrid ML)",
                     "R_D_score": r_d_score,
                     "modality": modality,
                     "extractor_used": "CLIP" if modality in ["vision", "video"] else
@@ -626,19 +703,20 @@ def run_single_dataset_pipeline(X, y, problem_type, store, encoder, did="local",
                 },
                 "dataset": {
                     "id": did,
-                    "n_samples": int(X_pca.shape[0]),
-                    "n_features_after_pca": int(X_pca.shape[1]),
+                    "n_samples": int(X_train_numpy.shape[0]),
+                    "n_features_after_pca": int(X_train_numpy.shape[1]),
                     "n_classes": int(out_dim),
                     "class_names": class_names
                 },
-                "nas_results": {
-                    "best_architecture": best_dl_params,
-                    "best_dl_utility": round(float(nas_study.best_value), 4)
+                "hybrid_ml_results": {
+                    "ensemble_size": len(top_trials),
+                    "models_used": [t.params.get('model', 'xgb') for t in top_trials],
+                    "best_ensemble_accuracy": round(float(final_acc), 4)
                 },
                 "final_performance": {
                     "test_accuracy": round(float(final_acc), 4) if final_acc is not None else None,
                     "classification_report": clf_report_str,
-                    "confusion_matrix": conf_matrix.tolist()
+                    "confusion_matrix": conf_matrix
                 }
             }
 
@@ -648,13 +726,12 @@ def run_single_dataset_pipeline(X, y, problem_type, store, encoder, did="local",
             except Exception as report_err:
                 print(f"  [LLM Report] Failed to generate AutoDL report: {report_err}")
 
-            # ─── Advanced Notebook Generator ─────────────────────────────────
             try:
                 from notebook_generator import generate_advanced_notebook
                 results_dict = {
-                    "X": X_test_f, "y": y_test_f, "y_test": y_true_np, "y_pred": y_pred_np,
+                    "X": X_test, "y": y_test, "y_test": y_test, "y_pred": final_y_pred,
                     "final_accuracy": final_acc,
-                    "paradigm": "AutoDL",
+                    "paradigm": "AutoDL (Hybrid ML)",
                     "modality": modality
                 }
                 nb_path = f"reports/{did}_advanced_analysis.ipynb"
@@ -663,11 +740,14 @@ def run_single_dataset_pipeline(X, y, problem_type, store, encoder, did="local",
             except Exception as nb_err:
                 print(f"  [Notebook Generator] Failed: {nb_err}")
 
+            result_score = final_acc if 'final_acc' in locals() and final_acc is not None else 0.0
             return {
-                "score": final_acc if 'final_acc' in locals() and final_acc is not None else float(nas_study.best_value) if 'nas_study' in locals() else 0.0,
-                "models_evaluated": len(nas_study.trials) if 'nas_study' in locals() else 10
+                "score": result_score,
+                "train_score": train_acc if 'train_acc' in locals() else 0.0,
+                "val_score": val_acc if 'val_acc' in locals() else 0.0,
+                "models_evaluated": len(nas_study.trials) if 'nas_study' in locals() else 20
             }
-            
+
         except Exception as e:
             print(f"  [AutoDL NAS] Failed: {e}")
             import traceback; traceback.print_exc()

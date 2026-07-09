@@ -35,20 +35,20 @@ def main():
     monitor_thread = threading.Thread(target=monitor_ram, daemon=True)
     monitor_thread.start()
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if torch.cuda.is_available():
-        torch.cuda.reset_peak_memory_stats()
+    assert torch.cuda.is_available(), "CUDA is required but not detected."
+    device = torch.device("cuda")
+    torch.cuda.reset_peak_memory_stats()
         
-    dataset_path = r"C:\Dinesh\AutoGluon Test\EuroSAT"
+    dataset_path = r"C:\Dinesh\AutoGluon Test\train"
     modality = 'vision'
-    config = {'modality': 'vision', 'domain': 'remote_sensing'}
+    config = {'modality': 'vision', 'domain': 'biology'}
     
     print("="*50)
     print("Starting MetaAutoML Custom Pipeline")
     print(f"Dataset Path  : {dataset_path}")
     print(f"Modality      : {modality}")
     print(f"Domain        : {config['domain']}")
-    print(f"Vision Model  : nvidia/mit-b0 (via remote_sensing domain)")
+    print(f"Vision Model  : google/siglip-base-patch16-224 (via biology domain)")
     print("="*50)
     
     MEMORY_INDEX_PATH = "memory_store.faiss"
@@ -70,7 +70,7 @@ def main():
     encoder.eval()
 
     print("\n🚀 Extracting Embeddings...")
-    embedder = UniversalEmbedder(device=device, batch_size=32, domain=config['domain'])
+    embedder = UniversalEmbedder(device=device, batch_size=128, domain=config['domain'])
     X, y = embedder.embed_directory(dataset_path, modality)
     
     print(f"✅ Embedding Extraction Complete! Shape: {X.shape}")
@@ -79,7 +79,7 @@ def main():
     result = run_single_dataset_pipeline(
         X, y, 'classification', store, encoder, 
         did=os.path.basename(dataset_path), 
-        validate=False,
+        validate=True,
         modality=modality,
         config=config
     )
@@ -96,12 +96,19 @@ def main():
         peak_vram = torch.cuda.max_memory_allocated() / (1024 * 1024)
         
     # Formatting output for terminal
-    accuracy = result.get('score', 0.0) if isinstance(result, dict) else 0.0
+    if isinstance(result, dict):
+        test_acc = result.get('score', 0.0)
+        train_acc = result.get('train_score', 0.0)
+        val_acc = result.get('val_score', 0.0)
+    else:
+        test_acc = train_acc = val_acc = 0.0
 
     print("\n" + "="*50)
     print("FINAL TRAINING METRICS")
     print("="*50)
-    print(f"Accuracy                : {accuracy:.4f}")
+    print(f"Training Accuracy       : {train_acc:.4f}")
+    print(f"Validation Accuracy     : {val_acc:.4f}")
+    print(f"Testing Accuracy        : {test_acc:.4f}")
     print(f"Peak RAM (MB)           : {peak_ram:.2f}")
     print(f"Peak VRam (MB)          : {peak_vram:.2f}")
     print(f"Total Training Time (s) : {total_time:.2f}")

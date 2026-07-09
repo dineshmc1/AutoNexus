@@ -22,6 +22,16 @@ DOMAIN_REGISTRY = {
             "model_id": "microsoft/beit-base-patch16-224-pt22k-ft22k",
             "embed_dim": 768,
             "description": "BEiT transformer pre-trained on medical/biological datasets. Superior for fine-grained biological features."
+        },
+        "dinov2": {
+            "model_id": "facebook/dinov2-base",
+            "embed_dim": 768,
+            "description": "Self-supervised vision transformer. Excellent for dense features and organism part detection."
+        },
+        "siglip": {
+            "model_id": "google/siglip-base-patch16-224",
+            "embed_dim": 768,
+            "description": "Sigmoid loss CLIP. Highly efficient for multi-lingual and broad biological concepts."
         }
     },
     "remote_sensing": {

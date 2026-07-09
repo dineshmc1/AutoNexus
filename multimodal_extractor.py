@@ -139,9 +139,17 @@ class UniversalEmbedder:
             from transformers import AutoProcessor, AutoModel
             from domain_registry import get_vision_model_config
             cfg = get_vision_model_config(self.domain, "clip")
-            self.vision_processor = AutoProcessor.from_pretrained(cfg["model_id"])
-            self.vision_model = AutoModel.from_pretrained(cfg["model_id"]).to(self.device)
-            self.vision_model.eval()
+            
+            if "imageomics" in cfg.get("model_id", ""):
+                import open_clip
+                model, _, preprocess = open_clip.create_model_and_transforms('hf-hub:' + cfg["model_id"])
+                self.vision_model = model.to(self.device)
+                self.vision_processor = preprocess
+                self.vision_model.eval()
+            else:
+                self.vision_processor = AutoProcessor.from_pretrained(cfg["model_id"])
+                self.vision_model = AutoModel.from_pretrained(cfg["model_id"]).to(self.device)
+                self.vision_model.eval()
         elif modality == 'audio' and not hasattr(self, "_ast_extractor"):
             from transformers import AutoFeatureExtractor, ASTForAudioClassification
             self._ast_model = ASTForAudioClassification.from_pretrained("MIT/ast-finetuned-audioset-10-10-0.4593").to(self.device)
@@ -164,33 +172,36 @@ class UniversalEmbedder:
                     continue
                     
                 if modality == 'vision':
-                    inputs = self.vision_processor(images=batch_data, return_tensors="pt")
-                    if hasattr(self.vision_processor, 'pad'):
-                        inputs = self.vision_processor.pad(inputs, return_tensors="pt")
-                    inputs = inputs.to(self.device)
+                    from domain_registry import get_vision_model_config
+                    cfg = get_vision_model_config(self.domain, "clip")
                     
-                    with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=(self.device.type=='cuda')):
-                        if hasattr(self.vision_model, 'get_image_features'):
-                            outputs = self.vision_model.get_image_features(**inputs)
-                        else:
-                            outputs = self.vision_model(**inputs)
-                            if hasattr(outputs, 'pooler_output') and outputs.pooler_output is not None:
-                                outputs = outputs.pooler_output
-                            elif hasattr(outputs, 'last_hidden_state'):
-                                if outputs.last_hidden_state.ndim == 4:
-                                    outputs = outputs.last_hidden_state.mean(dim=[2, 3])
-                                else:
-                                    outputs = outputs.last_hidden_state.mean(dim=1)
+                    if "imageomics" in cfg.get("model_id", ""):
+                        import torch
+                        inputs = torch.stack([self.vision_processor(img) for img in batch_data]).to(self.device)
+                        with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=(self.device.type=='cuda')):
+                            outputs = self.vision_model.encode_image(inputs)
+                        all_embeddings.append(outputs.float().cpu().numpy())
+                        all_labels.extend(batch_labels)
+                    else:
+                        inputs = self.vision_processor(images=batch_data, return_tensors="pt")
+                        if hasattr(self.vision_processor, 'pad'):
+                            inputs = self.vision_processor.pad(inputs, return_tensors="pt")
+                        # 🚀 MOVE TO GPU & ENABLE FP16 🚀
+                        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+                        
+                        with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=(self.device.type=='cuda')):
+                            if hasattr(self.vision_model, 'get_image_features'):
+                                outputs = self.vision_model.get_image_features(**inputs)
                             else:
-                                if outputs[0].ndim == 4:
-                                    outputs = outputs[0].mean(dim=[2, 3])
+                                outputs = self.vision_model(**inputs)
+                                if hasattr(outputs, 'pooler_output') and outputs.pooler_output is not None:
+                                    outputs = outputs.pooler_output
+                                elif hasattr(outputs, 'last_hidden_state'):
+                                    outputs = outputs.last_hidden_state.mean(dim=1)
                                 else:
                                     outputs = outputs[0].mean(dim=1)
-                        if isinstance(outputs, torch.Tensor): embeddings = outputs
-                        elif hasattr(outputs, 'image_embeds'): embeddings = outputs.image_embeds 
-                        elif hasattr(outputs, 'last_hidden_state'): embeddings = outputs.last_hidden_state[:, 0, :] 
-                        else: embeddings = outputs[0]
-                        all_embeddings.append(embeddings.float().cpu().numpy())
+                                    
+                        all_embeddings.append(outputs.float().cpu().numpy()) # Cast back to FP32 for NumPy
                         all_labels.extend(batch_labels)
                         
                 elif modality == 'audio':
@@ -297,13 +308,6 @@ class UniversalEmbedder:
                 
                 valid_filenames.append(f)
                 
-            # 🚨 BENCHMARK SUBSAMPLING LOGIC 🚨
-            if self.max_files_per_class and len(valid_filenames) > self.max_files_per_class:
-                import random
-                random.seed(42) # Reproducibility
-                valid_filenames = random.sample(valid_filenames, self.max_files_per_class)
-                print(f"  [Embedder] Subsampled {root} to {self.max_files_per_class} files for benchmark.")
-                
             for f in valid_filenames:
                 files.append(os.path.join(root, f))
                 labels.append(label)
@@ -326,13 +330,31 @@ class UniversalEmbedder:
         
         print(f"[UniversalEmbedder] Raw embeddings shape: {X_raw.shape} | Labels: {len(y)}")
         
-        # PCA Dimensionality Reduction (skip for small dims like MFCC ~40)
+        # PCA Dimensionality Reduction (Dynamic based on Variance)
         if X_raw.shape[1] > 100:
-            n_components = min(100, X_raw.shape[0])  # Can't have more components than samples
-            print(f"[UniversalEmbedder] Applying PCA to reduce dimensions from {X_raw.shape[1]} to {n_components}...")
-            pca = PCA(n_components=n_components, random_state=42)
+            print(f"[UniversalEmbedder] Applying Dynamic PCA on {X_raw.shape[1]} dimensions...")
+            from sklearn.decomposition import PCA
+            
+            # Calculate how many components are needed for 95% variance
+            pca_full = PCA(n_components=min(512, X_raw.shape[0], X_raw.shape[1]), random_state=42)
+            pca_full.fit(X_raw)
+            cumulative_var = np.cumsum(pca_full.explained_variance_ratio_)
+            
+            # Find dimensions for 90%, 92%, 95%, 98% variance
+            dims_90 = np.searchsorted(cumulative_var, 0.90) + 1
+            dims_95 = np.searchsorted(cumulative_var, 0.95) + 1
+            
+            # Use 95% as default, but cap at reasonable maximum (100) to prevent noise artifacts
+            final_n_components = min(dims_95, 100)
+            
+            # Ensure we don't exceed the number of samples
+            final_n_components = min(final_n_components, X_raw.shape[0])
+            
+            actual_variance = cumulative_var[final_n_components-1]
+            print(f"[UniversalEmbedder] PCA: Using {final_n_components} components ({actual_variance:.2%} variance)")
+            
+            pca = PCA(n_components=final_n_components, random_state=42)
             X_reduced = pca.fit_transform(X_raw)
-            print(f"[UniversalEmbedder] PCA complete. Explained variance: {np.sum(pca.explained_variance_ratio_):.2f}")
         else:
             X_reduced = X_raw
             
