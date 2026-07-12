@@ -7,11 +7,15 @@ def profile_dataset(dataset_id, X, y, problem_type):
     context = {"dataset_id": dataset_id, "problem_type": problem_type}
     
     # 1. Fetch OpenML Description (if available)
-    try:
-        ds = openml.datasets.get_dataset(dataset_id, download_data=False)
-        context["description"] = ds.description[:500] if ds.description else "No description provided."
-        context["domain"] = ds.creator if ds.creator else "Unknown"
-    except:
+    if isinstance(dataset_id, int) or (isinstance(dataset_id, str) and dataset_id.isdigit()):
+        try:
+            ds = openml.datasets.get_dataset(int(dataset_id), download_data=False)
+            context["description"] = ds.description[:500] if ds.description else "No description provided."
+            context["domain"] = ds.creator if ds.creator else "Unknown"
+        except:
+            context["description"] = "Inferred from column names."
+            context["domain"] = "Unknown"
+    else:
         context["description"] = "Inferred from column names."
         context["domain"] = "Unknown"
         

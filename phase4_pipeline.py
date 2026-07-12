@@ -249,13 +249,13 @@ def run_single_dataset_pipeline(X, y, problem_type, store, encoder, did="local",
                         try:
                             roc_auc = roc_auc_score(y_test_split, y_prob)
                             ll = log_loss(y_test_split, y_prob)
-                        except:
+                        except Exception:
                             roc_auc, ll = "N/A", "N/A"
                     else:
                         try:
                             roc_auc = roc_auc_score(y_test_split, y_prob, multi_class='ovr')
                             ll = log_loss(y_test_split, y_prob)
-                        except:
+                        except Exception:
                             roc_auc, ll = "N/A", "N/A"
                             
                     eval_metrics = {
@@ -300,7 +300,7 @@ def run_single_dataset_pipeline(X, y, problem_type, store, encoder, did="local",
                                 bin_acc = np.mean(np.array(y_true)[mask] == np.max(y_true))
                                 bin_conf = np.mean(y_prob[mask])
                                 ece += np.abs(bin_acc - bin_conf) * (np.sum(mask) / len(y_true))
-                            except:
+                            except Exception:
                                 pass
                     return ece
                 
@@ -400,7 +400,7 @@ def run_single_dataset_pipeline(X, y, problem_type, store, encoder, did="local",
                 print(f"  [Notebook Generator] Failed: {nb_err}")
 
             return {
-                "score": final_accuracy if 'final_accuracy' in locals() else best_params.get("utility_score", 0),
+                "score": final_accuracy if 'final_accuracy' in locals() and final_accuracy is not None else best_params.get("utility_score", 0),
                 "models_evaluated": models_actually_trained if 'models_actually_trained' in locals() else 1,
                 "eval_metrics": eval_metrics if 'eval_metrics' in locals() else {}
             }
@@ -465,6 +465,11 @@ def run_single_dataset_pipeline(X, y, problem_type, store, encoder, did="local",
                 # Dynamic search bounds based on actual PCA dimensionality
                 max_possible_depth = min(int(np.log2(n_features)) + 2, 15) 
                 
+                import torch
+                has_gpu = torch.cuda.is_available()
+                xgb_device = 'cuda' if has_gpu else 'cpu'
+                lgbm_device = 'gpu' if has_gpu else 'cpu'
+                
                 model_type = trial.suggest_categorical('model', ['xgb', 'lgbm', 'hgb'])
                 
                 if model_type == 'xgb':
@@ -478,7 +483,9 @@ def run_single_dataset_pipeline(X, y, problem_type, store, encoder, did="local",
                         'reg_alpha': trial.suggest_float('reg_alpha', 0.0, 20.0),
                         'reg_lambda': trial.suggest_float('reg_lambda', 0.0, 20.0),
                         'random_state': 42,
-                        'verbosity': 0
+                        'verbosity': 0,
+                        'tree_method': 'hist',
+                        'device': xgb_device
                     }
                     if problem_type == 'classification':
                         model = XGBClassifier(**params, use_label_encoder=False, eval_metric='logloss')
@@ -496,7 +503,8 @@ def run_single_dataset_pipeline(X, y, problem_type, store, encoder, did="local",
                         'reg_alpha': trial.suggest_float('reg_alpha', 0.0, 20.0),
                         'reg_lambda': trial.suggest_float('reg_lambda', 0.0, 20.0),
                         'random_state': 42,
-                        'verbose': -1
+                        'verbose': -1,
+                        'device_type': lgbm_device
                     }
                     if problem_type == 'classification':
                         model = LGBMClassifier(**params)
@@ -516,14 +524,26 @@ def run_single_dataset_pipeline(X, y, problem_type, store, encoder, did="local",
                     else:
                         model = HistGradientBoostingRegressor(**params)
                         
-                if problem_type == 'classification' and len(X_tr) < 5000:
-                    import torch
-                    idx = torch.randperm(X_tr.shape[0]).numpy()
-                    lam = np.random.beta(0.2, 0.2)  # Mixup alpha
-                    X_tr_aug = lam * X_tr + (1 - lam) * X_tr[idx]
-                    y_tr_aug = y_tr  # Keep original labels for mixup
-                    model.fit(X_tr_aug, y_tr)
-                else:
+                try:
+                    if model_type == 'xgb':
+                        from optuna.integration import XGBoostPruningCallback
+                        eval_metric = 'logloss' if problem_type == 'classification' else 'rmse'
+                        pruning_callback = XGBoostPruningCallback(trial, f"validation_0-{eval_metric}")
+                        model.fit(X_tr, y_tr, eval_set=[(X_v, y_v)], verbose=False, callbacks=[pruning_callback])
+                    elif model_type == 'lgbm':
+                        from optuna.integration import LightGBMPruningCallback
+                        if problem_type == 'classification':
+                            metric = 'multi_logloss' if len(np.unique(y_tr)) > 2 else 'binary_logloss'
+                        else:
+                            metric = 'rmse'
+                        pruning_callback = LightGBMPruningCallback(trial, metric, valid_name='valid_0')
+                        model.fit(X_tr, y_tr, eval_set=[(X_v, y_v)], eval_metric=metric.split('_')[-1], callbacks=[pruning_callback])
+                    else:
+                        model.fit(X_tr, y_tr)
+                except optuna.TrialPruned:
+                    raise
+                except Exception as e:
+                    # Fallback if callback integration fails
                     model.fit(X_tr, y_tr)
                     
                 preds = model.predict(X_v) # <-- EVALUATE ON VAL, NOT TRAIN
@@ -539,8 +559,30 @@ def run_single_dataset_pipeline(X, y, problem_type, store, encoder, did="local",
 
             # 4. Run Optuna HPO (Reduced trials since these models are fast)
             optuna.logging.set_verbosity(optuna.logging.WARNING)
-            nas_study = optuna.create_study(direction='maximize', study_name=f"hybrid_ml_{did}")
-            nas_study.optimize(lambda trial: objective_hybrid(trial, X_tr, y_tr, X_val, y_val, X_tr.shape[1]), n_trials=20)
+            
+            import numpy as np
+            if len(X_tr) > 15000:
+                print(f"  [HPO] Subsampling {len(X_tr)} rows to 15000 for faster HPO...")
+                idx = np.random.choice(len(X_tr), 15000, replace=False)
+                X_tr_hpo = X_tr[idx]
+                y_tr_hpo = y_tr[idx]
+            else:
+                X_tr_hpo = X_tr
+                y_tr_hpo = y_tr
+                
+            # Add Successive Halving Pruner
+            pruner = optuna.pruners.SuccessiveHalvingPruner(
+                min_resource=1000, # Minimum samples to evaluate before pruning
+                reduction_factor=3, # Keep top 1/3 of trials
+                min_early_stopping_rate=0
+            )
+
+            nas_study = optuna.create_study(
+                direction='maximize', 
+                study_name=f"hybrid_ml_{did}",
+                pruner=pruner # <-- ADD THIS
+            )
+            nas_study.optimize(lambda trial: objective_hybrid(trial, X_tr_hpo, y_tr_hpo, X_val, y_val, X_tr.shape[1]), n_trials=20)
             
             # 🚀 ENSEMBLE OF EXPERTS LOGIC 🚀
             # Get the top 3 trials from the study
@@ -558,38 +600,46 @@ def run_single_dataset_pipeline(X, y, problem_type, store, encoder, did="local",
                 
                 # Re-instantiate the best model type with these specific params
                 if model_name == 'xgb':
+                    import torch
+                    xgb_device = 'cuda' if torch.cuda.is_available() else 'cpu'
+                    params.update({'min_child_weight': 20, 'random_state': 42, 'tree_method': 'hist', 'device': xgb_device})
                     expert_model = XGBClassifier(**params, use_label_encoder=False) if problem_type=='classification' else XGBRegressor(**params)
                 elif model_name == 'lgbm':
+                    import torch
+                    lgbm_device = 'gpu' if torch.cuda.is_available() else 'cpu'
+                    params.update({'min_child_samples': 20, 'random_state': 42, 'device_type': lgbm_device})
                     expert_model = LGBMClassifier(**params) if problem_type=='classification' else LGBMRegressor(**params)
                 elif model_name == 'rf':
+                    params.update({'random_state': 42})
                     expert_model = RandomForestClassifier(**params) if problem_type=='classification' else RandomForestRegressor(**params)
                 elif model_name == 'hgb':
+                    params.update({'random_state': 42})
                     expert_model = HistGradientBoostingClassifier(**params) if problem_type=='classification' else HistGradientBoostingRegressor(**params)
                     
                 if problem_type == 'classification':
+                    expert_model.fit(X_tr, y_tr)
                     from sklearn.calibration import CalibratedClassifierCV
-                    calibrated_expert = CalibratedClassifierCV(expert_model, cv=5, method='isotonic')
+                    calibrated_expert = CalibratedClassifierCV(expert_model, cv='prefit', method='isotonic')
                     try:
-                        calibrated_expert.fit(X_temp, y_temp)
+                        calibrated_expert.fit(X_val, y_val)
                         expert_model = calibrated_expert
                     except Exception as e:
-                        print(f"  [Calibration] Failed (likely due to class imbalance in CV): {e}. Falling back to uncalibrated expert.")
-                        expert_model.fit(X_temp, y_temp)
+                        print(f"  [Calibration] Failed: {e}. Falling back to uncalibrated expert.")
                 else:
-                    expert_model.fit(X_temp, y_temp)
+                    expert_model.fit(X_tr, y_tr)
                 
-                def get_preds(X_data):
+                def get_preds(X_data, model_ref=expert_model):
                     if problem_type == 'classification':
-                        if hasattr(expert_model, 'predict_proba'):
-                            return expert_model.predict_proba(X_data)
+                        if hasattr(model_ref, 'predict_proba'):
+                            return model_ref.predict_proba(X_data)
                         else:
-                            p = expert_model.predict(X_data)
+                            p = model_ref.predict(X_data)
                             n_classes = len(np.unique(y_temp))
                             p_proba = np.zeros((len(p), n_classes))
                             p_proba[np.arange(len(p)), p.astype(int)] = 1.0
                             return p_proba
                     else:
-                        return expert_model.predict(X_data)
+                        return model_ref.predict(X_data)
                     
                 ensemble_preds_test.append(get_preds(X_test))
                 ensemble_preds_tr.append(get_preds(X_tr))
@@ -618,7 +668,7 @@ def run_single_dataset_pipeline(X, y, problem_type, store, encoder, did="local",
                         final_roc = roc_auc_score(y_test, final_preds_prob[:, 1])
                     else:
                         final_roc = roc_auc_score(y_test, final_preds_prob, multi_class='ovr')
-                except:
+                except Exception:
                     final_roc = "N/A"
                     
                 if 'le' in locals():
@@ -807,7 +857,22 @@ def main():
         
         from multimodal_extractor import UniversalEmbedder
         
-        embedder = UniversalEmbedder(device=device, batch_size=32, domain=config['domain'])
+        ADAPTER_PATH = f"lora_adapters/{modality}_{config.get('domain', 'general')}_lora"
+        
+        if modality in ['vision', 'audio', 'text'] and not os.path.exists(ADAPTER_PATH):
+            print(f"\n🧬 Training Universal LoRA Adapter for {modality}/{config.get('domain', 'general')}...")
+            from lora_adapter_trainer import train_universal_lora
+            train_universal_lora(
+                modality=modality,
+                domain=config.get('domain', 'general'),
+                data_dir=user_input if modality != 'tabular' else None,
+                output_path=ADAPTER_PATH,
+                epochs=5, batch_size=32
+            )
+        elif os.path.exists(ADAPTER_PATH):
+            print(f"✅ Found cached adapter: {ADAPTER_PATH}")
+            
+        embedder = UniversalEmbedder(device=device, batch_size=32, domain=config['domain'], modality=modality)
         X, y = embedder.embed_directory(user_input, modality)
         
         print(f"✅ Embedding Extraction Complete! Shape: {X.shape}")

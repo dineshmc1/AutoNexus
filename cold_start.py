@@ -453,15 +453,17 @@ class MemoryStore:
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Register a dataset and its best-performing models."""
+        embedding_arr = np.asarray(embedding, dtype=np.float32)
         self.records.append(
             DatasetRecord(
                 dataset_id=dataset_id,
-                embedding=np.asarray(embedding, dtype=np.float32),
+                embedding=embedding_arr,
                 models=list(models),
                 metadata=metadata or {},
             )
         )
-        self._index = None  # invalidate cached index
+        if self._index is not None:
+            self._index.add(embedding_arr.reshape(1, -1))
 
     def build_index(self) -> None:
         """(Re)build the FAISS index from current records."""

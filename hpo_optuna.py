@@ -64,7 +64,7 @@ def objective(trial, X, y, preprocessor, model_name, problem_type, w1, w2, w3):
     try:
         _, scores = baseline_screen(
             model_dict, preprocessor, X, y, problem_type,
-            sample_frac=1.0, cv=3, random_state=42
+            sample_frac=1.0, cv=1, random_state=42
         )
         if not scores:
             raise optuna.exceptions.TrialPruned()

@@ -39,16 +39,16 @@ def main():
     device = torch.device("cuda")
     torch.cuda.reset_peak_memory_stats()
         
-    dataset_path = r"C:\Dinesh\AutoGluon Test\train"
+    dataset_path = r"C:\Users\admin\Downloads\caltech 256\256_ObjectCategories\256_ObjectCategories"
     modality = 'vision'
-    config = {'modality': 'vision', 'domain': 'biology'}
+    config = {'modality': 'vision', 'domain': 'general'}
     
     print("="*50)
     print("Starting MetaAutoML Custom Pipeline")
     print(f"Dataset Path  : {dataset_path}")
     print(f"Modality      : {modality}")
     print(f"Domain        : {config['domain']}")
-    print(f"Vision Model  : google/siglip-base-patch16-224 (via biology domain)")
+    print(f"Vision Model  : openai/clip-vit-base-patch32 (via general domain)")
     print("="*50)
     
     MEMORY_INDEX_PATH = "memory_store.faiss"
@@ -70,7 +70,22 @@ def main():
     encoder.eval()
 
     print("\n🚀 Extracting Embeddings...")
-    embedder = UniversalEmbedder(device=device, batch_size=128, domain=config['domain'])
+    
+    ADAPTER_PATH = f"lora_adapters/{modality}_{config['domain']}_lora"
+    if not os.path.exists(ADAPTER_PATH):
+        print(f"\n🧬 Training Universal LoRA Adapter for {modality}/{config['domain']}...")
+        from lora_adapter_trainer import train_universal_lora
+        train_universal_lora(
+            modality=modality,
+            domain=config['domain'],
+            data_dir=dataset_path,
+            output_path=ADAPTER_PATH,
+            epochs=5, batch_size=32
+        )
+    else:
+        print(f"✅ Found cached adapter: {ADAPTER_PATH}")
+
+    embedder = UniversalEmbedder(device=device, batch_size=128, domain=config['domain'], modality=modality)
     X, y = embedder.embed_directory(dataset_path, modality)
     
     print(f"✅ Embedding Extraction Complete! Shape: {X.shape}")
