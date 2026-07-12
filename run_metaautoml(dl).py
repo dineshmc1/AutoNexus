@@ -39,7 +39,7 @@ def main():
     device = torch.device("cuda")
     torch.cuda.reset_peak_memory_stats()
         
-    dataset_path = r"C:\Users\admin\Downloads\caltech 256\256_ObjectCategories\256_ObjectCategories"
+    dataset_path = r"C:\Users\admin\Downloads\102 flowers\dataset\train"
     modality = 'vision'
     config = {'modality': 'vision', 'domain': 'general'}
     
@@ -48,7 +48,7 @@ def main():
     print(f"Dataset Path  : {dataset_path}")
     print(f"Modality      : {modality}")
     print(f"Domain        : {config['domain']}")
-    print(f"Vision Model  : openai/clip-vit-base-patch32 (via general domain)")
+    print(f"Vision Model  : resnet50 (via general domain)")
     print("="*50)
     
     MEMORY_INDEX_PATH = "memory_store.faiss"
