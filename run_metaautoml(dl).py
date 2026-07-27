@@ -4,7 +4,7 @@ import psutil
 import torch
 import warnings
 import threading
-
+import wandb
 # Suppress warnings
 warnings.filterwarnings('ignore')
 
@@ -18,6 +18,9 @@ def get_ram_usage():
     return process.memory_info().rss / (1024 * 1024)
 
 def main():
+    # 1. Initialize W&B at the VERY START
+    wandb.init(project="metaautoml-v1", name="102_flowers_resnet50")
+
     start_time = time.time()
     
     # Thread to monitor peak RAM usage accurately
@@ -48,7 +51,7 @@ def main():
     print(f"Dataset Path  : {dataset_path}")
     print(f"Modality      : {modality}")
     print(f"Domain        : {config['domain']}")
-    print(f"Vision Model  : resnet50 (via general domain)")
+    print(f"Vision Model  : openai/clip-vit-base-patch32 (via general domain)")
     print("="*50)
     
     MEMORY_INDEX_PATH = "memory_store.faiss"
@@ -128,6 +131,9 @@ def main():
     print(f"Peak VRam (MB)          : {peak_vram:.2f}")
     print(f"Total Training Time (s) : {total_time:.2f}")
     print("="*50)
+    
+    # 2. Finish W&B ONLY at the very end
+    wandb.finish()
 
 if __name__ == "__main__":
     main()

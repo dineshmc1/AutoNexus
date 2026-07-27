@@ -1,217 +1,476 @@
-# ML-Builder: Intelligent Meta-Learning & Agentic AutoML Framework
+<![CDATA[<div align="center">
 
-> A production-grade Automated Machine Learning and Deep Learning framework that **learns from past experiments**, uses **LLM agents** for intelligent decision-making, and delivers **SHAP-explainable models** with comprehensive HTML reports.
+# MetaAutoML — ML-Builder
 
----
+### A Unified, Memory-Augmented AutoML & AutoDL Framework  
+### for Tabular and Multi-Modal Data
 
-## 📖 Table of Contents
-1. [What is ML-Builder?](#what-is-ml-builder)
-2. [Problems in Current AutoML Systems](#problems-in-current-automl-systems)
-3. [Key Features](#key-features)
-4. [Pipeline Workflows](#pipeline-workflows)
-5. [Design Choices: Why These Components?](#design-choices-why-these-components)
-6. [Folder Structure & File Explanations](#folder-structure--file-explanations)
-7. [Limitations](#limitations)
-8. [Installation & Setup](#installation--setup)
-9. [Quick Start](#quick-start)
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
+[![Optuna](https://img.shields.io/badge/HPO-Optuna-blue)](https://optuna.org/)
+[![FAISS](https://img.shields.io/badge/Memory-FAISS-orange)](https://github.com/facebookresearch/faiss)
+[![W&B](https://img.shields.io/badge/Tracking-Weights%20%26%20Biases-yellow?logo=weightsandbiases)](https://wandb.ai/)
+[![SHAP](https://img.shields.io/badge/XAI-SHAP-red)](https://shap.readthedocs.io/)
 
----
-
-## 🚀 What is ML-Builder?
-
-**ML-Builder** is an advanced end-to-end framework for automating machine learning (AutoML) and deep learning (AutoDL) pipelines. 
-It ingests raw datasets (Tabular, Vision, Audio, Text, Video) and outputs fully trained, optimized, and mathematically explainable models. 
-
-**What it solves:** It automates the tedious, trial-and-error process of data cleaning, feature engineering, model selection, and hyperparameter tuning, bridging the gap between raw data and production-ready models.
-
-**Why it solves it:** By leveraging **Meta-Learning** (a memory of past experiments) and **Agentic AI** (Large Language Models acting as data scientists), ML-Builder makes decisions intelligently rather than relying on exhaustive brute-force search.
+</div>
 
 ---
 
-## ⚠️ Problems in Current AutoML Systems
+## 📌 Project Overview
 
-Traditional AutoML tools (like TPOT, Auto-sklearn, or H2O) suffer from fundamental flaws that ML-Builder directly addresses:
+**MetaAutoML (ML-Builder)** is a research-grade, end-to-end Automated Machine Learning framework that goes beyond conventional AutoML by integrating **meta-learning**, **multi-modal data support**, and **LLM-augmented decision-making** into a single cohesive pipeline.
 
-1. **Amnesia (Starting Blind):** Every time a traditional AutoML system sees a new dataset, it starts from scratch. It doesn't remember that a dataset from yesterday was nearly identical and that XGBoost with depth 4 worked best.
-2. **Brute-Force Inefficiency:** They blindly loop through hundreds of algorithms and hyperparameter combinations, wasting massive amounts of compute and time.
-3. **Lack of Business Context:** They optimize purely for mathematical metrics (e.g., RMSE or Accuracy) without understanding real-world constraints (e.g., latency, interpretability, or risk tolerance).
-4. **Single Modality:** Most are strictly limited to tabular CSV data and cannot natively handle images, audio, or text without manual pre-processing.
+### Why MetaAutoML?
 
----
+Traditional AutoML tools treat every dataset as a blank slate — re-running the entire model search from scratch each time. MetaAutoML solves this by maintaining a **persistent FAISS-backed memory store** of past experiments. When a new dataset arrives, the system computes its statistical fingerprint, retrieves similar past datasets, and warm-starts hyperparameter optimisation — dramatically reducing search time while preserving (or improving) accuracy.
 
-## ✨ Key Features
+### Key Differentiators
 
-- **Meta-Learning Memory:** Remembers past datasets using FAISS vector search to instantly warm-start hyperparameter optimization.
-- **LLM Agentic Consultant:** A team of 5 AI Agents (Data, Business, Feature, Model, Critic) that analyze your data and business goals to dynamically generate a pipeline plan.
-- **Universal Multi-Modality:** Natively supports Tabular, Vision, Audio, Text, and Video datasets using domain-specific embedders (CLIP, SentenceTransformers, AST).
-- **AutoDL & Neural Architecture Search (NAS):** Automatically routes complex or unstructured data to Deep Learning pipelines, optimizing MLP/CNN architectures via Optuna.
-- **Adaptive Resource Management:** Intelligently scales feature engineering and cross-validation down for massive datasets to prevent Out-Of-Memory (OOM) crashes.
-- **Self-Contained Reporting:** Generates beautiful, portable HTML reports and Jupyter Notebooks with SHAP (SHapley Additive exPlanations) values for deep interpretability.
+| Feature | MetaAutoML | Conventional AutoML |
+|---|---|---|
+| **Memory-Augmented Search** | ✅ FAISS knowledge base warm-starts HPO | ❌ Cold-start every time |
+| **Paradigm Routing** | ✅ R(D) router decides ML vs. DL | ❌ Single paradigm |
+| **Multi-Modal Support** | ✅ Vision, Audio, Text, Video, Tabular | ❌ Tabular only |
+| **LLM-Guided Decisions** | ✅ Model shortlisting + explainability | ❌ None |
+| **Resource-Aware Adaptation** | ✅ Dynamic pipeline caps per dataset | ❌ Fixed configurations |
+| **Ensemble of Experts** | ✅ Calibrated soft-voting ensemble | ❌ Single best model |
+| **Explainability Reports** | ✅ SHAP + LLM-generated narratives | ❌ Basic metrics only |
 
----
+### Target Users
 
-## 🔄 Pipeline Workflows
-
-ML-Builder operates through several intelligent workflows depending on your data and preferences.
-
-### 1. Meta-Learning Similarity Retrieval
-* **Fingerprinting:** Converts the dataset into a 10D statistical fingerprint (rows, cols, skewness, missing rate, etc.).
-* **Siamese Encoding:** Passes the 10D vector through a trained contrastive neural network to project it into a 32D semantic space.
-* **Retrieval:** Queries the **FAISS MemoryStore** to find the top 5 historically similar datasets.
-* **Warm-Start:** Extracts the best hyperparameters from those past datasets to seed the Optuna search, skipping hours of blind exploration.
-
-### 2. Agentic Workflow
-* **Data Agent:** Profiles the dataset and detects the target variable.
-* **Business Agent:** Interacts with the user to understand goals, constraints, and success metrics.
-* **Feature & Model Agents:** Propose custom feature engineering strategies and model architectures.
-* **Critic Agent:** A strict dual-gate validation system that checks for data leakage, metric mismatch, and resource constraints before allowing execution.
-
-### 3. AutoML Pipeline (Classical Machine Learning)
-* **Pre-processing:** Imputation (median/mode) and automatic scaling (Standard/Robust based on normality tests).
-* **Feature Engineering:** Up to 7 adaptive stages, including target encoding, skewness correction (log1p), outlier capping (IQR), and polynomial/interaction generation.
-* **Screening:** Evaluates 29 different algorithms (XGBoost, LightGBM, RF, SVM, etc.) on a data subsample.
-* **Full Train & Selection:** Trains the top contenders on full data, using a Multi-Objective Utility function (Accuracy + Speed + Simplicity) to pick the winner.
-
-### 4. AutoDL Pipeline (Deep Learning)
-* **Routing:** Unstructured data (Images, Audio, Text) or highly complex tabular data is routed to AutoDL.
-* **Feature Extraction:** Uses Universal Embedders (e.g., CLIP) to convert media to dense vectors.
-* **NAS (Neural Architecture Search):** Uses Optuna to dynamically search for the best PyTorch MLP architecture (layers, hidden dims, dropout, LR).
-* **Early Stopping:** Trains the optimal architecture with patience-based early stopping to prevent overfitting.
+- **ML Researchers** exploring meta-learning and transfer learning for AutoML.
+- **Data Scientists** who need a robust, explainable pipeline for both tabular and multi-modal tasks.
+- **Students & Academics** studying automated machine learning architectures.
 
 ---
 
-## 🧠 Design Choices: Why These Components?
+## 🏗️ Architecture
 
-- **Why Meta-Learning?** Because human data scientists rely on intuition from past projects. Meta-learning mathematically replicates this intuition, cutting search times by up to 90%.
-- **Why FAISS?** Facebook AI Similarity Search is the industry standard for dense vector retrieval. It allows us to search thousands of past ML experiments in milliseconds.
-- **Why a Siamese Task Encoder?** Raw statistical features (like row count) don't map linearly to model performance. Contrastive learning forces datasets that require similar model families (e.g., tree-based vs. linear) closer together in the vector space.
-- **Why Optuna?** Compared to GridSearch or Hyperopt, Optuna's define-by-run API and efficient Bayesian optimization (TPE) algorithm find better hyperparameter spaces faster, and it supports our memory-based "warm-starting".
-- **Why SHAP?** Feature importance from trees is often biased. SHAP provides mathematically provable, game-theoretic attributions for both global (dataset-wide) and local (single prediction) interpretability.
+MetaAutoML implements a **seven-phase pipeline** with an adaptive paradigm router that decides between Classical ML and Deep Learning paths at runtime.
+
+```
+                           ┌──────────────────────────────────────────┐
+                           │          1. DATA INGESTION               │
+                           │   OnboardingAgent → Modality Detection   │
+                           └─────────────────┬────────────────────────┘
+                                             │
+                        ┌────────────────────┼──────────────────────┐
+                        ▼                                           ▼
+              ┌─────────────────┐                      ┌────────────────────┐
+              │  TABULAR (CSV)  │                      │  MULTI-MODAL       │
+              │  data_loader    │                      │  (Vision/Audio/    │
+              │  data_cleaner   │                      │   Text/Video)      │
+              └────────┬────────┘                      │  UniversalEmbedder │
+                       │                               │  + LoRA Adapters   │
+                       ▼                               └─────────┬──────────┘
+              ┌─────────────────┐                                │
+              │ 2. RESOURCE     │                                │
+              │    ANALYSIS     │                                │
+              │ ResourceManager │                                │
+              └────────┬────────┘                                │
+                       │                                         │
+                       ▼                                         │
+              ┌─────────────────┐                                │
+              │ 3. FEATURE      │                                │
+              │    ENGINEERING  │                                │
+              │ FeatureEngineer │                                │
+              └────────┬────────┘                                │
+                       │                                         │
+                       ▼                                         ▼
+              ┌──────────────────────────────────────────────────────┐
+              │            4. META-LEARNING CORE                     │
+              │  ┌──────────────┐  ┌───────────────┐  ┌───────────┐ │
+              │  │ Dataset      │  │ Siamese Task  │  │ FAISS     │ │
+              │  │ Embedding    │→ │ Encoder (MLP) │→ │ Memory    │ │
+              │  │ (10D → 32D)  │  │ Contrastive   │  │ Store     │ │
+              │  └──────────────┘  └───────────────┘  └─────┬─────┘ │
+              └──────────────────────────────────────────────┼───────┘
+                                                             │
+                       ┌─────────────────────────────────────┘
+                       ▼
+              ┌─────────────────────┐
+              │ 5. PARADIGM ROUTER  │
+              │ R(D) = λ₁·LLM(D)   │
+              │      + λ₂·Memory(D) │
+              │      + λ₃·Heuristic │
+              └──────┬──────────┬───┘
+                     │          │
+            R(D)≤τ   │          │  R(D)>τ
+                     ▼          ▼
+            ┌──────────┐  ┌──────────────┐
+            │ AutoML   │  │   AutoDL     │
+            │ Pipeline │  │   Pipeline   │
+            │ (HPO +   │  │ (Hybrid ML   │
+            │  SHAP)   │  │  on Embeds)  │
+            └────┬─────┘  └──────┬───────┘
+                 │               │
+                 ▼               ▼
+              ┌──────────────────────────┐
+              │ 6. EVALUATION & REPORTS  │
+              │ • SHAP Explanations      │
+              │ • LLM Consultant Report  │
+              │ • Jupyter Notebook       │
+              │ • W&B Experiment Tracking│
+              └──────────────────────────┘
+```
+
+### Paradigm Router — R(D) Decision Function
+
+The core innovation is the **R(D) paradigm router**, which fuses three signals to decide whether a dataset is better served by Classical ML or Deep Learning:
+
+```
+R(D) = λ₁ · LLM(D) + λ₂ · Memory(D) + λ₃ · Heuristics(D)
+```
+
+| Signal | Source | Weight (Default) |
+|---|---|---|
+| `LLM(D)` | GPT-4o-mini probability estimate | λ₁ = 0.5 |
+| `Memory(D)` | FAISS retrieval of similar past datasets | λ₂ = 0.2 |
+| `Heuristics(D)` | Rule-based complexity scoring | λ₃ = 0.3 |
+
+If `R(D) > τ` (default τ = 0.5), the system routes to AutoDL; otherwise, it uses classical AutoML.
 
 ---
 
-## 📁 Folder Structure & File Explanations
+## 📂 Repository Structure
 
-```text
+```
 ML-Builder/
-├── agents/                       # LLM Agentic System
-│   ├── agent_orchestrator.py     # Coordinates all agents sequentially
-│   ├── business_agent.py         # Translates human goals to ML objectives
-│   ├── critic_agent.py           # 2-stage quality gate checking for leakage/mismatch
-│   ├── data_agent.py             # Auto-detects targets and problem types
-│   ├── feature_agent.py          # Plans categorical encoding and FE strategies
-│   ├── model_agent.py            # Recommends baseline algorithms
-│   └── notebook_generator.py     # Compiles EDA and analysis to Jupyter Notebooks
-├── reports/                      # Output directory for HTML reports and plots
-├── shap_plots/                   # Output directory for SHAP visualizations
-├── wandb/                        # Weights & Biases local logs
-├── auto_dl_nas.py                # Neural Architecture Search for PyTorch models
-├── build_memory.py               # Script to pre-train memory on 250+ OpenML datasets
-├── cold_start.py                 # Core FAISS MemoryStore and threshold logic
-├── confidence_calibration.py     # Calibrates reliability of memory decisions
-├── config.py                     # Global constants (LLM models, WandB config)
-├── data_cleaner.py               # Imputation and duplicate removal
-├── data_loader.py                # Ingestion, leakage detection, train/test splitting
-├── dataset_embedding.py          # Computes the 10D statistical dataset fingerprint
-├── dataset_profiler.py           # Extracts schema and metadata for LLM context
-├── dl_faiss_memory.py            # Specialized FAISS memory for multimodal DL
-├── domain_registry.py            # Registry of domain-specific embedders (e.g., BioClip)
-├── eda.py                        # Generates basic Exploratory Data Analysis plots
-├── explainer.py                  # Standard feature importance extraction
-├── feature_engineering.py        # 7-stage adaptive FE engine (skew, interactions, etc.)
-├── feature_processing.py         # Builds scikit-learn ColumnTransformers
-├── heuristics.py                 # Rule-based fallback system for model selection
-├── hpo_optuna.py                 # Hyperparameter tuning logic with warm-start injection
-├── llm_explainer.py              # Generates natural language consultant reports
-├── llm_suggester.py              # Queries LLM for direct model suggestions
-├── main.py                       # CLI entry point for standard AutoML
-├── modality_router.py            # Determines data type (tabular/vision/audio/etc.)
-├── model_selector.py             # Multi-metric evaluation and model persistence
-├── model_trainer.py              # 29-model catalogue and baseline screening loops
-├── multi_objective.py            # Utility scoring (Accuracy + Speed + Simplicity)
-├── multimodal_extractor.py       # Converts images/audio/text to dense vectors via HF
-├── onboarding_agent.py           # First-touch interactive prompt for business context
-├── paradigm_router.py            # Mathematically decides between AutoML and AutoDL
-├── phase4_pipeline.py            # The core Meta-Learning research pipeline execution
-├── report_generator.py           # Compiles plots and logs into self-contained HTML
-├── routing_engine.py             # Combines Memory, LLM, and Heuristics into 1 signal
-├── run_agentic_pipeline.py       # Entry point for the Agent-driven workflow
-├── shap_explainer.py             # Standalone SHAP generator for Phase 4
-├── task_encoder.py               # The PyTorch Siamese neural network definition
-└── wandb_logger.py               # Wrapper for experiment tracking
+│
+├── main.py                     # CLI entry point (legacy pipeline orchestrator)
+├── phase4_pipeline.py          # Primary pipeline — meta-learning + paradigm routing
+├── config.py                   # Environment & API key configuration
+├── requirements.txt            # Core Python dependencies
+│
+├── ─── Data Ingestion ───────────────────────────────
+│   ├── data_loader.py          # CSV/Excel loading, problem type detection, leakage checks
+│   ├── data_cleaner.py         # Missing value imputation, duplicate removal
+│   ├── onboarding_agent.py     # LLM-powered modality detection & business context intake
+│   └── dataset_profiler.py     # Statistical profiling for LLM context
+│
+├── ─── Feature Engineering ──────────────────────────
+│   ├── feature_engineering.py  # Advanced FE: NLP extraction, Yeo-Johnson, interactions
+│   ├── feature_processing.py   # Sklearn preprocessing pipeline (scaling, encoding)
+│   └── resource_manager.py     # Dynamic pipeline caps based on dataset size
+│
+├── ─── Meta-Learning Core ───────────────────────────
+│   ├── dataset_embedding.py    # 10D statistical fingerprint computation
+│   ├── task_encoder.py         # Siamese MLP encoder (10D → 32D learned embeddings)
+│   ├── cold_start.py           # Adaptive cold-start strategy with FAISS retrieval
+│   ├── unified_memory.py       # Unified FAISS memory for ML + DL configurations
+│   └── build_memory.py         # OpenML dataset ingestion for pre-seeding memory
+│
+├── ─── Model Training & Selection ───────────────────
+│   ├── model_trainer.py        # Model catalogue (14+ algorithms), baseline screening
+│   ├── model_selector.py       # Metric calculation, Grid/Random hyperparameter search
+│   ├── hpo_optuna.py           # Multi-objective Optuna HPO with warm-starting
+│   └── multi_objective.py      # Utility scoring: accuracy × speed × complexity
+│
+├── ─── Paradigm Routing ─────────────────────────────
+│   ├── paradigm_router.py      # R(D) fusion function (LLM + Memory + Heuristics)
+│   ├── heuristics.py           # Rule-based model suggestions per dataset properties
+│   ├── llm_suggester.py        # LLM-powered model shortlisting with name validation
+│   └── routing_engine.py       # Additional routing logic
+│
+├── ─── Multi-Modal Support ──────────────────────────
+│   ├── multimodal_extractor.py # UniversalEmbedder: CLIP, AST, SentenceTransformer
+│   ├── domain_registry.py      # Pre-trained model registry (general, biology, remote sensing)
+│   ├── lora_config.py          # LoRA hyperparameter registry per modality
+│   ├── lora_adapter_trainer.py # PEFT LoRA fine-tuning for domain adaptation
+│   └── dl_faiss_memory.py      # Modality-specific FAISS memory for DL results
+│
+├── ─── Explainability & Reporting ───────────────────
+│   ├── explainer.py            # Permutation importance + SHAP orchestration
+│   ├── shap_explainer.py       # SHAP value computation & plot generation
+│   ├── llm_explainer.py        # LLM-generated consultant reports (Markdown)
+│   ├── report_generator.py     # Standalone HTML report with embedded visuals
+│   ├── notebook_generator.py   # Jupyter notebook auto-generation
+│   ├── eda.py                  # Exploratory data analysis plots
+│   └── confidence_calibration.py # ECE reliability diagrams
+│
+├── ─── Experiment Tracking ──────────────────────────
+│   ├── wandb_logger.py         # Weights & Biases integration wrapper
+│   └── wandb/                  # W&B run artifacts
+│
+├── ─── Agentic Pipeline ─────────────────────────────
+│   └── agents/
+│       ├── agent_orchestrator.py  # Multi-agent pipeline coordinator
+│       ├── data_agent.py          # LLM-driven dataset understanding
+│       ├── business_agent.py      # Business context → ML objectives translation
+│       ├── feature_agent.py       # LLM-recommended feature engineering plans
+│       ├── model_agent.py         # Memory-augmented model recommendations
+│       ├── critic_agent.py        # Adversarial validation of pipeline decisions
+│       └── notebook_generator.py  # Agent-specific EDA notebook creation
+│
+├── ─── Benchmark Scripts ────────────────────────────
+│   ├── run_metaautoml(ml).py   # Tabular ML benchmark runner with metrics
+│   ├── run_metaautoml(dl).py   # Multi-modal DL benchmark runner with metrics
+│   └── run_agentic_pipeline.py # Agentic pipeline execution script
+│
+├── ─── Tests ────────────────────────────────────────
+│   └── tests/
+│       ├── test_oof_leakage.py    # Out-of-fold data leakage validation
+│       └── test_ensemble_gpu.py   # GPU ensemble placement tests
+│
+├── ─── Persistence ──────────────────────────────────
+│   ├── memory_store.faiss      # FAISS index (serialised)
+│   ├── memory_store.pkl        # Metadata for FAISS records
+│   ├── task_encoder.pt         # Trained Siamese encoder weights
+│   └── embedding_cache/        # Cached multi-modal embeddings
+│
+└── ─── Documentation ────────────────────────────────
+    ├── README.md               # This file
+    ├── codebase_analysis.md    # Deep-dive file-level analysis
+    └── walkthrough.md          # System walkthrough guide
 ```
 
 ---
 
-## 🛑 Limitations
+## 🔧 Technology Stack
 
-While ML-Builder is highly advanced, it currently has the following limitations:
-1. **Unsupervised Learning:** The system requires labeled data. It currently only supports Supervised Learning (Classification and Regression). It cannot perform native clustering or anomaly detection without labels.
-2. **Reinforcement Learning:** Not supported.
-3. **Time-Series Forecasting:** While it can handle date columns via feature extraction, it lacks native sliding-window cross-validation and ARIMA/Prophet models for strict sequential forecasting.
-4. **Extreme Big Data:** It relies on Pandas/Scikit-learn. It does not use distributed processing frameworks like Apache Spark or Dask. Datasets larger than your machine's RAM will cause OOM errors (though the `ResourceManager` tries to prevent this via downsampling).
-5. **Generative AI:** It uses LLMs to *build* models and *explain* data, but it does not train Generative AI models (like LLMs or Diffusion models) on your data.
+### Core ML & Data
+
+| Library | Purpose | Version |
+|---|---|---|
+| `pandas` | Tabular data manipulation | ≥ 1.5.0 |
+| `numpy` | Numerical computation | ≥ 1.23.0 |
+| `scikit-learn` | Classical ML models, preprocessing, metrics | ≥ 1.2.0 |
+| `scipy` | Statistical functions (skew, entropy, Yeo-Johnson) | ≥ 1.9.0 |
+| `xgboost` | Gradient boosting (GPU-accelerated) | — |
+| `lightgbm` | Gradient boosting (GPU-accelerated) | — |
+
+### Deep Learning & Multi-Modal
+
+| Library | Purpose |
+|---|---|
+| `torch` | PyTorch backend for Siamese encoder, GPU acceleration |
+| `transformers` | Hugging Face models (CLIP, AST, BEiT, SigLIP) |
+| `sentence-transformers` | Text embedding via MiniLM |
+| `peft` | Parameter-Efficient Fine-Tuning (LoRA adapters) |
+| `open_clip` | BioCLIP and domain-specific vision models |
+| `librosa` | Audio feature extraction (MFCC) |
+| `opencv-python` | Video frame extraction |
+
+### Meta-Learning & Memory
+
+| Library | Purpose |
+|---|---|
+| `faiss-cpu` | Approximate nearest neighbor search for memory retrieval |
+| `optuna` | Multi-objective hyperparameter optimisation |
+
+### LLM Integration
+
+| Library | Purpose |
+|---|---|
+| `litellm` | Unified LLM API (OpenAI, Anthropic, DeepSeek, etc.) |
+| `python-dotenv` | Environment variable management for API keys |
+
+### Experiment Tracking & Explainability
+
+| Library | Purpose |
+|---|---|
+| `wandb` | Weights & Biases experiment tracking |
+| `shap` | SHAP value computation and visualisation |
+| `matplotlib` / `seaborn` | Plotting and visualisation |
 
 ---
 
-## ⚙️ Installation & Setup
+## 🚀 Getting Started
 
-**Prerequisites:** Python 3.9+
+### Prerequisites
+
+- **Python** 3.10+
+- **CUDA** (optional, for GPU-accelerated training)
+- **API Keys** (optional, for LLM features)
+
+### Installation
 
 ```bash
-# 1. Clone the repository
-git clone <repository-url>
+# Clone the repository
+git clone https://github.com/your-username/ML-Builder.git
 cd ML-Builder
 
-# 2. Create and activate a virtual environment
+# Create virtual environment
 python -m venv .venv
-# Windows:
-.venv\Scripts\activate
-# Mac/Linux:
-source .venv/bin/activate
+source .venv/bin/activate  # Linux/macOS
+.venv\Scripts\activate     # Windows
 
-# 3. Install dependencies
+# Install dependencies
 pip install -r requirements.txt
-pip install litellm torch lightgbm xgboost wandb openml python-dotenv transformers
+
+# Install additional dependencies for full functionality
+pip install torch xgboost lightgbm optuna litellm wandb transformers sentence-transformers peft
 ```
 
-**Environment Variables:**
-Copy `.env.example` to `.env` and add your API keys. The system uses `litellm` and defaults to OpenRouter to access modern reasoning models.
+### Environment Configuration
+
+Create a `.env` file in the project root:
+
 ```env
-OPENROUTER_API_KEY=your_key_here
-LLM_MODEL=openrouter/deepseek/deepseek-r1-distill-llama-70b
+# LLM Configuration (optional — disable with USE_LLM=False in config.py)
+OPENROUTER_API_KEY=your_openrouter_key_here
+LLM_MODEL=openrouter/openai/gpt-4o-mini
+
+# Weights & Biases (optional)
+WANDB_API_KEY=your_wandb_key_here
+
+# Hugging Face (optional — for domain-specific models)
+HF_TOKEN=your_huggingface_token_here
 ```
 
----
+### Quick Start
 
-## 🏃 Quick Start
+#### Tabular Dataset (Interactive Mode)
 
-### 1. Populate the FAISS Memory (Run Once)
-To enable Meta-Learning, build the memory bank by training on OpenML datasets:
 ```bash
-python build_memory.py
-```
-
-### 2. Standard AutoML Run
-Run a classic pipeline on tabular data:
-```bash
-python main.py --dataset data.csv --target your_label --enable_fe --tune --report
-```
-
-### 3. Agentic & Meta-Learning Pipeline
-Run the full intelligent pipeline (LLM agents + FAISS routing + Multi-modal support):
-```bash
-python run_agentic_pipeline.py data.csv
-# or for an image directory:
 python phase4_pipeline.py
-# (When prompted, paste the path to your image directory)
+# Follow prompts: Enter CSV path → Business context → Target column
 ```
 
-### Output Files
-After a run, check the generated directories:
-* `models/` - Contains the saved `.pkl` pipeline and metrics.
-* `reports/` - Contains the interactive HTML report and Jupyter Notebooks.
-* `shap_plots/` - Contains the global and local interpretability visuals.
+#### Tabular Dataset (Script Mode)
+
+```bash
+python run_metaautoml(ml).py
+# Edit the script to set your dataset_path and target_column
+```
+
+#### Multi-Modal Dataset (Vision)
+
+```bash
+python run_metaautoml(dl).py
+# Automatically extracts embeddings, trains LoRA adapter, runs HPO
+```
+
+#### Agentic Pipeline (LLM-Guided)
+
+```bash
+python run_agentic_pipeline.py
+# Multi-agent system: DataAgent → BusinessAgent → CriticAgent → ModelAgent
+```
+
+### Offline Mode
+
+To run without LLM or W&B connectivity:
+
+```python
+# In config.py
+USE_LLM = False
+USE_WANDB = False
+```
+
+The system gracefully degrades — using rule-based heuristics and FAISS memory instead of LLM suggestions.
 
 ---
-*Built for the next generation of intelligent, automated data science.*
+
+## 📊 Pipeline Walkthrough
+
+### Phase 1 — Data Ingestion & Cleaning
+The `OnboardingAgent` detects modality (tabular/vision/audio/text/video) from file extensions. For tabular data, `data_loader.py` handles CSV/Excel loading with automatic problem type detection (classification vs. regression) and target leakage detection via correlation analysis and DecisionTree probing.
+
+### Phase 2 — Resource Analysis
+The `ResourceManager` inspects dataset dimensions and cardinality to set dynamic caps on feature engineering complexity, preventing OOM errors on large or high-cardinality datasets.
+
+### Phase 3 — Feature Engineering
+The `FeatureEngineer` applies an adaptive suite of transformations:
+- **Text Stats**: Word count, character count, unique word ratio from text columns
+- **Skew Correction**: Yeo-Johnson transforms for highly skewed numeric features
+- **Adaptive Scaling**: Per-feature selection of StandardScaler vs. RobustScaler
+- **Interaction Features**: Pairwise multiplication of top correlated features
+- **Multicollinearity Pruning**: Drops features above a configurable correlation threshold
+
+### Phase 4 — Meta-Learning & Memory Retrieval
+A 10-dimensional statistical fingerprint is computed for each dataset, then projected into a 32D learned embedding space via a Siamese MLP trained with contrastive loss. FAISS retrieves the most similar past datasets and their best-performing model configurations for warm-starting.
+
+### Phase 5 — Training & Hyperparameter Optimisation
+- **AutoML Path**: Optuna HPO across LLM-suggested + memory-retrieved model shortlist, with multi-objective scoring (accuracy × speed × complexity).
+- **AutoDL Path**: Hybrid ML-on-Embeddings using XGBoost/LightGBM/HistGBM on PCA-reduced embeddings, with an Ensemble of Experts (top-3 calibrated models, soft-voting).
+
+### Phase 6 — Evaluation & Reporting
+- **SHAP Explanations**: TreeExplainer for tree-based models, KernelExplainer for others
+- **LLM Consultant Report**: 4-pillar analytics narrative (Descriptive → Diagnostic → Predictive → Prescriptive)
+- **Jupyter Notebook**: Auto-generated with EDA, confusion matrices, and t-SNE visualisations
+- **W&B Logging**: Full experiment tracking with artifacts
+
+---
+
+## 📐 System Metrics
+
+MetaAutoML tracks several novel system-level metrics:
+
+| Metric | Formula | Purpose |
+|---|---|---|
+| **C(D)** — Confidence Score | R(D) routing score | Confidence in paradigm decision |
+| **ECE** — Expected Calibration Error | Reliability diagram bins | Model probability calibration |
+| **SCR** — Search Compression Ratio | Total models / Models trained | Efficiency of memory-guided search |
+| **PR** — Performance Retention | Final accuracy / Baseline accuracy | Quality relative to naive baseline |
+| **TUS** — Transfer Utility Score | SCR × PR | Combined transfer learning benefit |
+
+---
+
+## 🧪 Testing
+
+```bash
+# Run leakage detection tests
+python -m pytest tests/test_oof_leakage.py -v
+
+# Run GPU ensemble tests
+python -m pytest tests/test_ensemble_gpu.py -v
+
+# Run cold-start unit tests
+python test_cold_start.py
+
+# Run embedding pipeline tests
+python test_embedding.py
+```
+
+---
+
+## ⚙️ Configuration Reference
+
+### `config.py`
+
+| Variable | Default | Description |
+|---|---|---|
+| `USE_LLM` | `True` | Enable/disable LLM-powered features |
+| `USE_WANDB` | `True` | Enable/disable Weights & Biases logging |
+| `LLM_MODEL` | `openrouter/openai/gpt-4o-mini` | Default LLM model identifier |
+| `WANDB_PROJECT` | `metaautoml-v1` | W&B project name |
+| `WANDB_ENTITY` | `None` | W&B team/entity name |
+
+### `ColdStartConfig` (cold_start.py)
+
+| Parameter | Default | Description |
+|---|---|---|
+| `k_neighbors` | 10 | FAISS retrieval count |
+| `lambda_sensitivity` | 0.5 | Threshold sensitivity for ε(D) |
+| `alpha` | 0.6 | Weight for similarity in combined score |
+| `beta` | 0.3 | Weight for past performance |
+| `gamma` | 0.1 | Weight for recency |
+
+---
+
+## 📄 License
+
+This project is licensed under the [MIT License](LICENSE).
+
+---
+
+## 📖 Citation
+
+If you use MetaAutoML in academic research, please cite:
+
+```bibtex
+@software{metaautoml2026,
+  title     = {MetaAutoML: A Unified, Memory-Augmented AutoML Framework},
+  author    = {Dinesh},
+  year      = {2026},
+  url       = {https://github.com/your-username/ML-Builder}
+}
+```
+
+---
+
+<div align="center">
+  <strong>Built with 🔬 for the ML research community.</strong>
+</div>
+]]>

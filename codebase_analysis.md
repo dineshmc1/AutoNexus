@@ -1,152 +1,400 @@
-# ML-Builder Codebase Analysis
+<![CDATA[# MetaAutoML — Codebase Analysis
 
-## System Architecture Overview
+> **Generated**: July 2026 | **Scope**: Full repository audit of all source files
 
-```mermaid
-graph TD
-    A["User Input<br/>(CSV or Folder)"] --> B["OnboardingAgent<br/>onboarding_agent.py"]
-    B --> C{"Modality<br/>Router"}
-    C -->|"tabular (CSV)"| D["PATH B: AutoML"]
-    C -->|"vision/audio/text/video"| E["PATH A: AutoDL"]
-    
-    D --> D1["data_loader.py<br/>Load & Clean CSV"]
-    D1 --> D2["dataset_embedding.py<br/>10D Meta-Features"]
-    D2 --> D3["task_encoder.py<br/>Siamese → 32D"]
-    D3 --> D4["FAISS Memory<br/>cold_start.py"]
-    D4 --> D5["paradigm_router.py<br/>R(D) Score"]
-    D5 -->|"R(D) ≤ τ"| F["AutoML Pipeline"]
-    D5 -->|"R(D) > τ"| G["AutoDL Hybrid ML"]
-    
-    E --> E1["LoRA Adapter Check<br/>lora_adapter_trainer.py"]
-    E1 --> E2["UniversalEmbedder<br/>multimodal_extractor.py"]
-    E2 --> E3["PCA Reduction"]
-    E3 --> G
-    
-    F --> F1["Feature Engineering"]
-    F1 --> F2["LLM + Memory<br/>Model Selection"]
-    F2 --> F3["HPO (Optuna)"]
-    F3 --> F4["SHAP + Metrics"]
-    F4 --> F5["Report + Save"]
-    
-    G --> G1["Preprocessor<br/>+ Label Encode"]
-    G1 --> G2["3-Way Split"]
-    G2 --> G3["Optuna HPO<br/>(XGB/LGBM/HGB)"]
-    G3 --> G4["Ensemble of<br/>Top-3 Experts"]
-    G4 --> G5["Calibration +<br/>Soft Voting"]
-    G5 --> G6["SHAP + Report"]
+---
+
+## 1. System Architecture Summary
+
+MetaAutoML implements a **meta-learning-augmented AutoML/AutoDL pipeline** with two execution paths (Classical ML and Hybrid DL) unified by a FAISS-backed memory store and an LLM-guided paradigm router.
+
+### Data Flow
+
+```
+Input → OnboardingAgent → Modality Detection
+  ├── Tabular → DataLoader → Cleaner → ResourceManager → FeatureEngineer
+  └── Multi-Modal → UniversalEmbedder (CLIP/AST/MiniLM + LoRA)
+        ↓
+  DatasetEmbedding (10D) → SiameseEncoder (32D) → FAISS Retrieval
+        ↓
+  ParadigmRouter: R(D) = λ₁·LLM + λ₂·Memory + λ₃·Heuristics
+  ├── R(D) ≤ τ → AutoML (Optuna HPO + SHAP)
+  └── R(D) > τ → AutoDL (Hybrid ML-on-Embeddings + Ensemble)
+        ↓
+  Evaluation → SHAP → LLM Report → Notebook → W&B Logging
 ```
 
 ---
 
-## PART 1: CSV File Upload (AutoML Path)
+## 2. File-Level Analysis
 
-### Step-by-Step Process
+### 2.1 Entry Points & Orchestration
 
-| Step | File | Action |
-|------|------|--------|
-| 1 | `phase4_pipeline.py:main()` | User enters CSV path via CLI prompt |
-| 2 | `onboarding_agent.py` | LLM extracts business objective, domain, target column |
-| 3 | `data_loader.py:load_local_dataset()` | Reads CSV, detects problem type (clf if <10 unique targets), label-encodes |
-| 4 | `dataset_embedding.py` | Computes 10D statistical fingerprint (log-rows, skewness, correlation, entropy, etc.) |
-| 5 | `task_encoder.py` | Siamese encoder transforms 10D → 32D learned embedding |
-| 6 | `cold_start.py` | FAISS L2 search for top-5 similar past datasets; warm-starts hyperparams if distance ≤ 0.50 |
-| 7 | `llm_suggester.py` | LLM suggests 3 best models given meta-features |
-| 8 | `paradigm_router.py` | Computes R(D) = λ₁·LLM(D) + λ₂·Memory(D) + λ₃·Heuristics(D); if R(D) > τ(0.5) → AutoDL, else AutoML |
-| 9 | `feature_engineering.py` | Yeo-Johnson, outlier capping, text NLP extraction, rare category bucketing, interaction/ratio/poly features, correlated column drop |
-| 10 | `feature_processing.py` | Builds sklearn ColumnTransformer (Standard/Robust scaling, OneHot/Target encoding) |
-| 11 | `hpo_optuna.py` | Runs 20-30 Optuna trials per model with memory warm-start; MedianPruner |
-| 12 | `multi_objective.py` | Selects winner via utility = w1·Accuracy + w2·Speed + w3·Complexity |
-| 13 | `shap_explainer.py` | TreeExplainer/KernelExplainer generates SHAP plots |
-| 14 | `llm_explainer.py` | LLM generates comprehensive natural-language report |
-| 15 | `cold_start.py` | Saves winning model + hyperparams to FAISS memory for future warm-starting |
-| 16 | `notebook_generator.py` | Generates Jupyter notebook with 4-pillar analytics |
+#### `phase4_pipeline.py` (928 lines)
+**Role**: Primary pipeline orchestrator — the central nervous system of the entire framework.
 
----
+- **`extract_meta_features(X, y)`**: Computes 11 statistical meta-features (n_samples, n_features, num_ratio, cat_ratio, missing_rate, skewness_mean, mean_corr, n_classes, is_binary, target_entropy, majority_class_ratio).
+- **`run_single_dataset_pipeline()`**: Core execution function (~750 lines). Handles:
+  - Multi-modal override detection (bypasses FAISS for non-tabular data)
+  - FAISS memory querying with cold-start fallback
+  - LLM model suggestion integration
+  - Paradigm routing via `route_paradigm()`
+  - AutoML path: FeatureEngineer → HPO → SHAP → LLM Report → Memory Save
+  - AutoDL path: PCA embedding → Optuna HPO (XGB/LGBM/HGB) → Ensemble of Experts (top-3 calibrated models, soft-voting) → SHAP → Report
+  - System metrics: C(D), ECE, SCR, PR, TUS
+- **`main()`**: Interactive CLI with OnboardingAgent, supports both agentic and direct pipeline modes.
 
-## PART 2: Image/Video/Audio/Text Upload (AutoDL Path)
+**Key Design Decisions**:
+- AutoDL uses a strict 3-way split (64% train / 16% val / 20% test) to prevent leakage.
+- Ensemble uses `CalibratedClassifierCV` with isotonic regression for probability calibration.
+- HPO subsamples to 15K rows max for speed on large datasets.
+- Uses `SuccessiveHalvingPruner` to cut unpromising Optuna trials early.
 
-### Step-by-Step Process
+#### `main.py` (486 lines)
+**Role**: Legacy CLI pipeline (pre-Phase 4). Implements a simpler 7-step flow: Load → Clean → Resource Analysis → FE → Baseline Screen → Full Training → Report. Does **not** include meta-learning or paradigm routing. Retained for backward compatibility.
 
-| Step | File | Action |
-|------|------|--------|
-| 1 | `phase4_pipeline.py:main()` | User enters folder path via CLI |
-| 2 | `onboarding_agent.py` | Detects modality by file extensions; LLM extracts domain (general/biology/remote_sensing) |
-| 3 | `lora_adapter_trainer.py` | If no cached adapter: trains LoRA on base model (CLIP/AST/MiniLM) for the domain |
-| 4 | `multimodal_extractor.py` | `UniversalEmbedder` initialized with domain-specific model from `domain_registry.py` |
-| 5 | — | **Vision**: CLIP/BioCLIP/DINOv2 extracts 512D per image |
-| 5 | — | **Audio**: AST (AudioSet) extracts 527D per clip |
-| 5 | — | **Text**: MiniLM-L6-v2 extracts 384D per document |
-| 5 | — | **Video**: CLIP extracts 512D per frame → mean-pooled per video |
-| 6 | `multimodal_extractor.py` | Dynamic PCA: targets 95% variance, caps at 300D, floor at 100D |
-| 7 | — | Embedding cache check (MD5 hash of folder path → `.npz` file) |
-| 8 | `phase4_pipeline.py` | **Multi-modal override**: bypasses tabular FAISS + paradigm router; forces `paradigm = "AutoDL"` |
-| 9 | `feature_processing.py` | Builds preprocessor on embedding features |
-| 10 | — | Label encoding + 3-way split: Train 64% / Val 16% / Test 20% |
-| 11 | — | DL FAISS Memory warm-start: PCA→100D→pad→query `dl_faiss_memory.py` |
-| 12 | — | Optuna HPO: 20 trials over {XGBoost-GPU, LightGBM-GPU, HistGradientBoosting} with SuccessiveHalving pruner |
-| 13 | — | Mixup augmentation if classification + <5000 samples |
-| 14 | — | **Ensemble of Experts**: Top-3 trials retrained, calibrated (Isotonic), soft-voted |
-| 15 | — | SHAP TreeExplainer on first expert; summary plot saved |
-| 16 | `dl_faiss_memory.py` | Saves 100D PCA embedding + best params to modality-specific FAISS index |
-| 17 | `llm_explainer.py` + `notebook_generator.py` | Comprehensive report + notebook generation |
+#### `run_metaautoml(ml).py` (124 lines)
+**Role**: Benchmark script for tabular ML. Hardcoded to `bank.csv`. Includes threaded peak RAM monitoring, VRAM tracking, and structured metrics output (accuracy, precision, recall, F1, confusion matrix).
+
+#### `run_metaautoml(dl).py` (140 lines)
+**Role**: Benchmark script for multi-modal DL. Targets vision datasets (e.g., 102 Flowers). Initialises W&B, trains LoRA adapter if not cached, extracts embeddings, runs the full DL pipeline with train/val/test metrics.
 
 ---
 
-## PART 3: Identified Inefficiencies & Bugs
+### 2.2 Data Ingestion & Cleaning
 
-### 🔴 Critical Issues
+#### `data_loader.py` (158 lines)
+- **`load_local_dataset(path, target)`**: Loads CSV/Excel, drops constant/ID columns, detects problem type.
+- **`detect_problem_type(y)`**: Classification if ≤20 unique values or object dtype; regression otherwise.
+- **Leakage Detection**: Pearson correlation check (|r| > 0.95) + DecisionTree single-feature probing (AUC > 0.95) against the target.
 
-| # | Location | Issue | Impact |
-|---|----------|-------|--------|
-| 1 | [lora_adapter_trainer.py:114-121](file:///c:/Dinesh/AutoML/ML-Builder/lora_adapter_trainer.py#L114-L121) | **LoRA training loop is a no-op** — the forward pass and loss calculation are `pass`. No gradients are computed, no weights are updated. The saved adapter is identical to the initialized (random) weights. | LoRA adapters provide zero benefit. All "trained" adapters are random noise. |
-| 2 | [phase4_pipeline.py:252-253](file:///c:/Dinesh/AutoML/ML-Builder/phase4_pipeline.py#L252-L253) | **Bare `except:` clauses** throughout — exceptions are silently swallowed (lines 252, 258, 303, 671, etc.). ROC-AUC, log-loss, and calibration errors fail silently. | Bugs and data issues are invisible; metrics report "N/A" with no diagnostics. |
-| 3 | [phase4_pipeline.py:529](file:///c:/Dinesh/AutoML/ML-Builder/phase4_pipeline.py#L529) | **Mixup applied with original labels** — `y_tr_aug = y_tr` after feature mixing. True mixup requires interpolated soft labels. This trains on corrupted features with wrong hard labels. | Degrades model accuracy when triggered (<5000 samples). |
-| 4 | [dataset_profiler.py:11](file:///c:/Dinesh/AutoML/ML-Builder/dataset_profiler.py#L11) | **Attempts OpenML API call for local datasets** — `openml.datasets.get_dataset(dataset_id)` is called with a filename like "bank.csv", which always fails and falls back silently. | Unnecessary network latency + silent failure on every local dataset run. |
-| 5 | [phase4_pipeline.py:623](file:///c:/Dinesh/AutoML/ML-Builder/phase4_pipeline.py#L623) | **CalibratedClassifierCV with cv=5 on X_temp** — uses the combined train+val set for calibration fitting, but the model was already HPO'd on a subset. Cross-validated calibration on the same data used for training causes data leakage in the calibration stage. | Overly optimistic calibration; ECE metrics are unreliable. |
+#### `data_cleaner.py` (66 lines)
+- Drops exact duplicates, imputes numeric with median, categorical with mode.
+- Logs all actions to console.
 
-### 🟠 Performance Inefficiencies
+#### `onboarding_agent.py` (93 lines)
+- Scans file extensions to detect modality (`.jpg`/`.png` → vision, `.wav`/`.mp3` → audio, etc.).
+- Uses LLM to extract business context (objective, success metric, domain, constraints).
+- For tabular: prompts user for target column with auto-guess (last column).
 
-| # | Location | Issue | Impact |
-|---|----------|-------|--------|
-| 6 | [multimodal_extractor.py:225-226](file:///c:/Dinesh/AutoML/ML-Builder/multimodal_extractor.py#L225-L226) | **`get_vision_model_config()` called inside every batch** in the extraction loop. This re-reads the domain registry dict on every single batch iteration. | Unnecessary overhead per batch (minor but accumulates on large datasets). |
-| 7 | [multimodal_extractor.py:392-404](file:///c:/Dinesh/AutoML/ML-Builder/multimodal_extractor.py#L392-L404) | **Double PCA** — `PCA(n_components=512)` fitted first to determine variance, then a second `PCA(final_dim)` is fitted again from scratch. Should use `pca_full` directly with slicing. | 2× the PCA computation time on large embedding matrices. |
-| 8 | [hpo_optuna.py:65-68](file:///c:/Dinesh/AutoML/ML-Builder/hpo_optuna.py#L65-L68) | **Full `baseline_screen` with 3-fold CV inside every Optuna trial** — each trial does 3-fold CV across the entire dataset. With 30 trials × 3 folds = 90 full training runs per model. | HPO is extremely slow on medium+ datasets. Should use a holdout or early stopping. |
-| 9 | [phase4_pipeline.py:601-647](file:///c:/Dinesh/AutoML/ML-Builder/phase4_pipeline.py#L601-L647) | **Ensemble experts retrained on full X_temp** — the top-3 Optuna trials are re-instantiated and retrained from scratch on the combined train+val data, repeating all the work. | 3× redundant full retraining after HPO. |
-| 10 | [cold_start.py:470-471](file:///c:/Dinesh/AutoML/ML-Builder/cold_start.py#L470-L471) | **FAISS index rebuilt from scratch on every `add()`** — `build_index()` calls `np.vstack` on all records then `faiss.IndexFlatL2`. With N records, this is O(N) per insertion. | Scales poorly as memory grows (though currently small). |
-| 11 | [multimodal_extractor.py:179](file:///c:/Dinesh/AutoML/ML-Builder/multimodal_extractor.py#L179) | **`num_workers=0` on Windows** — DataLoader parallelism is disabled entirely on Windows. All I/O is serial. | Embedding extraction is CPU-bound on Windows; no parallel data loading. |
-
-### 🟡 Code Quality & Design Issues
-
-| # | Location | Issue |
-|---|----------|-------|
-| 12 | [phase4_pipeline.py:2-8](file:///c:/Dinesh/AutoML/ML-Builder/phase4_pipeline.py#L2-L8) | **Imports repeated inside functions** — `numpy`, `sklearn.metrics`, `sklearn.model_selection`, `torch` are re-imported at module top AND inside `run_single_dataset_pipeline()`. |
-| 13 | [phase4_pipeline.py:52-805](file:///c:/Dinesh/AutoML/ML-Builder/phase4_pipeline.py#L52-L805) | **750-line monolithic function** — `run_single_dataset_pipeline()` handles AutoML, AutoDL, SHAP, metrics, reports, memory saving, and notebooks in one function with deep nesting. |
-| 14 | [phase4_pipeline.py:631-642](file:///c:/Dinesh/AutoML/ML-Builder/phase4_pipeline.py#L631-L642) | **Closure `get_preds()` defined inside a loop** — captures `expert_model` from enclosing scope which changes each iteration; only works because it's called immediately. Fragile pattern. |
-| 15 | [phase4_pipeline.py:403](file:///c:/Dinesh/AutoML/ML-Builder/phase4_pipeline.py#L403) | **`'final_accuracy' in locals()`** — using `locals()` to check variable existence is an anti-pattern; indicates poor control flow. |
-| 16 | Multiple files | **Hardcoded paths** — `r"C:\Dinesh\AutoGluon Test\bank.csv"` in run scripts, `"memory_store.faiss"` repeated in 3+ files. |
-| 17 | [modality_router.py](file:///c:/Dinesh/AutoML/ML-Builder/modality_router.py) | **Dead code** — `modality_router.py` is never imported anywhere. `onboarding_agent.py` duplicates its logic inline. |
-| 18 | [multimodal_extractor.py:418-489](file:///c:/Dinesh/AutoML/ML-Builder/multimodal_extractor.py#L418-L489) | **Dead code** — `_process_vision_batch()`, `_process_text_batch()`, `_process_video_batch()` are superseded by `_extract_fast()` but never cleaned up. |
-| 19 | [phase4_pipeline.py:483](file:///c:/Dinesh/AutoML/ML-Builder/phase4_pipeline.py#L483) | **GPU hardcoded** — `'device': 'cuda'` for XGBoost and `'device_type': 'gpu'` for LightGBM in the AutoDL path. Crashes on CPU-only machines. |
-| 20 | [multimodal_extractor.py:99-105](file:///c:/Dinesh/AutoML/ML-Builder/multimodal_extractor.py#L99-L105) | **CPU parallelization stub** — `_process_single_file()` and `_extract_cpu_parallel()` both return `None` or fall back to serial extraction. |
-
-### 🔵 Architectural Observations
-
-| # | Observation |
-|---|-------------|
-| 21 | **Two separate entry points with duplicated logic** — `main.py` (standalone CLI pipeline) and `phase4_pipeline.py:main()` (MetaAutoML universal ingestion) share ~40% logic but are completely separate codepaths. |
-| 22 | **Two separate FAISS memory systems** — Tabular uses `cold_start.py:MemoryStore` (32D embeddings), while multimodal uses `dl_faiss_memory.py:ModalityFAISSMemory` (100D PCA embeddings). They never cross-pollinate. |
-| 23 | **LLM dependency is fragile** — `paradigm_router.py`, `llm_suggester.py`, `onboarding_agent.py`, and `llm_explainer.py` all independently call LiteLLM with different error handling. If the API key is missing, 4 separate fallbacks trigger. |
-| 24 | **`feature_engineering.py` has two constructor signatures** — the `phase4_pipeline.py` instantiation (line 157) passes `corr_threshold` but not `fe_level`, while `main.py` passes `fe_level` and many more params. The two callers use different subsets of features. |
+#### `dataset_profiler.py` (41 lines)
+- Gathers dataset context for LLM: OpenML description (if applicable), sample columns, missing %, class distribution, imbalance ratio.
 
 ---
 
-## Summary
+### 2.3 Feature Engineering & Preprocessing
 
-**AutoML (CSV)**: `OnboardingAgent → Load CSV → 10D Embedding → 32D Siamese → FAISS Retrieval → LLM Suggestions → Paradigm Router → Feature Engineering → Optuna HPO (30 trials × 3-CV) → Multi-Objective Selection → SHAP → Report → Memory Save`
+#### `feature_engineering.py` (346 lines) — `FeatureEngineer` class
+**Capabilities**:
+1. **NLP Stats**: Extracts word_count, char_count, unique_word_ratio from text columns.
+2. **Rare Category Grouping**: Merges categories below `rare_threshold` (default 1%) into `_RARE`.
+3. **Target Encoding**: Maps categorical values to target mean (classification/regression aware).
+4. **Skew Correction**: Yeo-Johnson transform for features with |skew| > threshold.
+5. **Adaptive Scaling**: Chooses StandardScaler (skew < 1.5) vs RobustScaler (skew ≥ 1.5) per feature.
+6. **Interaction Features**: Top-N pairwise multiplications of most correlated numeric features.
+7. **Multicollinearity Pruning**: Drops one feature from pairs with |corr| > `corr_threshold`.
 
-**AutoDL (Multimodal)**: `OnboardingAgent → LoRA Check → Domain-Specific Embedder (CLIP/AST/MiniLM) → GPU Batch Extraction → Dynamic PCA → Force AutoDL → Preprocessor → 3-Way Split → Optuna HPO (20 trials, GPU XGB/LGBM) → Top-3 Ensemble + Calibration → SHAP → Report → DL Memory Save`
+**Auto-DL Bypass**: When operating on dense embeddings (AutoDL path), FE is skipped to preserve embedding geometry.
 
-**Top 3 fixes to prioritize:**
-1. **Implement the LoRA training loop** — currently a complete no-op
-2. **Replace 3-fold CV inside Optuna trials** with holdout eval — 3× speedup
-3. **Fix Mixup implementation** — use soft labels or remove it entirely
+#### `feature_processing.py` (90 lines)
+- Builds sklearn `ColumnTransformer` with adaptive scaling and encoding.
+- Supports feature hashing for high-cardinality categoricals (>50 unique values).
+- Returns `(preprocessor, numeric_features, categorical_features)`.
+
+#### `resource_manager.py` (115 lines) — `ResourceManager` class
+- Analyses dataset size + cardinality to set `fe_level` (1–3) and restrict heavy operations.
+- Prevents OOM by capping one-hot encoding and polynomial features on large datasets.
+- Adjusts model whitelist based on available resources (e.g., drops SVM on >50K rows).
+
+---
+
+### 2.4 Meta-Learning Core
+
+#### `dataset_embedding.py` (281 lines)
+**Embedding Vector** (10 dimensions):
+| Dim | Feature | Normalization |
+|-----|---------|---------------|
+| 0 | Log-scaled sample count | / 10.0 |
+| 1 | Log-scaled feature count | / 10.0 |
+| 2 | Samples-to-features ratio | log / 10.0 |
+| 3 | Mean skewness | clipped / 5.0 |
+| 4 | High-skew fraction | raw [0,1] |
+| 5 | Mean pairwise correlation | raw [0,1] |
+| 6 | Coefficient of variation (tanh) | [-1,1] |
+| 7 | Log-scaled unique classes | / 5.0 |
+| 8 | Normalised target entropy | [0,1] |
+| 9 | Missing rate | [0,1] |
+
+Also provides `build_embedding_matrix()` for batch processing and `save_embeddings()` for JSON persistence.
+
+#### `task_encoder.py` (321 lines) — Siamese MLP
+- **Architecture**: Linear(10→64) → BatchNorm → ReLU → Linear(64→32) → L2-Normalize.
+- **Training**: Contrastive loss on positive pairs (same model family) and negative pairs (different families). 1:2 pos/neg ratio.
+- **Model Families**: tree_based, linear, distance, neural_ml, kernel, bagging.
+- **Early Stopping**: Patience=20, ReduceLROnPlateau (factor=0.5, patience=10).
+- Saved as `task_encoder.pt`. Auto-loaded if present; trains on-the-fly if not.
+
+#### `cold_start.py` (849 lines) — `MemoryStore` + Adaptive Cold-Start
+**MemoryStore**:
+- Wraps FAISS index + `DatasetRecord` list (dataset_id, embedding, models, metadata).
+- Supports: add, build_index, rebuild_index, save/load, remove entries, get_models_for_indices (voting).
+- Persistence: `memory_store.faiss` + `memory_store.pkl`.
+
+**Adaptive Cold-Start**:
+- Computes ε(D) = μ_S - λ·σ_S as adaptive threshold.
+- Combined score: α·Similarity + β·Performance + γ·Recency (exponential decay).
+- Similarity floor: If best cosine sim < 0.75, forces cold-start regardless.
+- Falls back to heuristic model lists when memory is empty or sparse (<3 valid neighbors).
+
+**ColdStartLogger**: Structured logging for paper-ready metrics (JSON + DataFrame export).
+
+#### `unified_memory.py` (321 lines) — `UnifiedMemoryStore`
+- Extends the concept to support both ML and DL paradigms.
+- Paradigm-aware routing: can retrieve configs tagged as ML or DL separately.
+- FAISS-backed with the same persistence pattern.
+
+---
+
+### 2.5 Model Training & HPO
+
+#### `model_trainer.py` (349 lines)
+**Model Catalogue** (14+ algorithms):
+
+| Classification | Regression |
+|---|---|
+| logistic, sgd_clf, knn_clf, naive_bayes | ridge, lasso, elastic, sgd_reg, knn_reg |
+| dt_clf, svc, mlp_clf | dt_reg, svr, mlp_reg |
+| rf, et_clf, ada_clf, bag_clf | rf_reg, et_reg, ada_reg, bag_reg |
+| gb, lgbm_clf, xgb_clf | gb_reg, lgbm_reg, xgb_reg |
+
+- **`baseline_screen()`**: Fast screening with optional subsampling (default 20%). Cross-validation or single-split. Time-budgeted per model.
+- **`get_models()`**: Returns filtered model dict. Supports whitelist filtering.
+
+#### `model_selector.py` (194 lines)
+- Calculates comprehensive metrics (accuracy, precision, recall, F1, ROC-AUC, log-loss for classification; MAE, MSE, RMSE, R² for regression).
+- Hyperparameter tuning via GridSearchCV or RandomizedSearchCV.
+
+#### `hpo_optuna.py` (154 lines)
+- Multi-objective Optuna with `RegularizedObjective`.
+- Warm-starting from FAISS-retrieved hyperparameters.
+- W&B integration for logging each trial.
+- Supports XGBoost, LightGBM, RandomForest, ExtraTrees, GradientBoosting, Ridge, Logistic.
+
+#### `multi_objective.py` (123 lines)
+- Utility function: `U = w₁·Score + w₂·Speed + w₃·Simplicity`.
+- Model complexity map (1=simple linear → 4=XGB/LGBM).
+- `select_best_model_multiobjective()`: Filters candidates within 5% of best score, then ranks by utility.
+
+---
+
+### 2.6 Paradigm Routing
+
+#### `paradigm_router.py` (90 lines)
+- **`calculate_heuristics_d()`**: Rule-based score (0–1). Large datasets (>100K) and high dimensionality (>100 features) favor DL; small feature spaces (<20) favor ML.
+- **`calculate_llm_d()`**: Asks LLM for P(DL beats ML). JSON response with `{"probability": float}`.
+- **`calculate_memory_d()`**: Checks if top-K FAISS neighbors used DL (via `is_dl` metadata flag).
+- **`route_paradigm()`**: R(D) = 0.5·LLM + 0.2·Memory + 0.3·Heuristics. Threshold τ=0.5.
+
+#### `heuristics.py` (109 lines)
+- 9 rules for classification, 7 for regression. Examples:
+  - Large dataset (>5K rows) → lgbm, xgb, rf
+  - High categorical ratio (>60%) → tree-based
+  - Small dataset (<200 rows) → naive_bayes, knn, dt
+  - High multicollinearity (corr > 0.7) → regularised linear
+- Returns top-5 deduplicated suggestions.
+
+#### `llm_suggester.py` (127 lines)
+- Strict model name validation against exact catalogue keys.
+- Regex-based JSON extraction (handles `<think>` blocks from reasoning models).
+- Logs suggestions, latency, and token usage to W&B.
+
+---
+
+### 2.7 Multi-Modal Support
+
+#### `multimodal_extractor.py` (424 lines) — `UniversalEmbedder`
+**Supported Modalities & Models**:
+| Modality | Default Model | Embedding Dim |
+|---|---|---|
+| Vision | CLIP ViT-B/32 | 512 |
+| Audio | AST (AudioSet) | 527 (logits) |
+| Text | all-MiniLM-L6-v2 | 384 |
+| Video | CLIP (frame-level → mean) | 512 |
+
+- **DataLoader pipeline**: `MultiModalDataset` with custom collation, batch processing, FP16 autocast on GPU.
+- **Dynamic PCA**: Targets 95% variance, caps at 300D, floors at 100D.
+- **Embedding Cache**: MD5 hash of folder path → `.npz` file for instant reload.
+- **Auto Train/Test Detection**: If folder contains `train/test/val` subfolders, auto-routes to `train/`.
+
+#### `domain_registry.py` (74 lines)
+Pre-configured model registry:
+- **general**: CLIP ViT-B/32, ResNet50
+- **biology**: BioCLIP, BEiT, DINOv2, SigLIP
+- **remote_sensing**: MiT-B0, ResNet50
+- **documents**: TrOCR, ResNet50
+
+#### `lora_adapter_trainer.py` (182 lines)
+- PEFT LoRA fine-tuning with dynamic epoch scaling (50K+ samples → 2 epochs, 10K+ → 3, else 5).
+- Supports vision (CLIP), audio (AST), text (SentenceTransformer).
+- Adds a linear classifier head on top of embeddings for supervised LoRA training.
+- Saves adapter weights to `lora_adapters/{modality}_{domain}_lora/`.
+
+#### `dl_faiss_memory.py` (64 lines) — `ModalityFAISSMemory`
+- Per-modality FAISS index (100D PCA embeddings).
+- Stores best_params + accuracy per dataset.
+- Pseudo-similarity: `1 / (1 + L2_distance)`.
+
+---
+
+### 2.8 Explainability & Reporting
+
+#### `shap_explainer.py` (88 lines)
+- **TreeExplainer**: For rf, et, gb, xgb, lgbm, ada, bag models.
+- **KernelExplainer**: For linear models (background: kmeans k=10, sample: 50). For MLP/SVM/KNN (sample: 30).
+- Generates beeswarm + bar plots, logs to W&B, returns top-3 feature names.
+
+#### `llm_explainer.py` (112 lines)
+- **AutoML prompt**: 4-pillar analytics (Descriptive → Diagnostic → Predictive → Prescriptive).
+- **AutoDL prompt**: 5-section structure (Executive Summary → Why DL → NAS Results → Performance → Efficiency).
+- Saves Markdown to `reports/{dataset_id}_consultant_report.md`.
+- Logs HTML-wrapped report to W&B.
+
+#### `report_generator.py` (316 lines)
+- Standalone HTML report with embedded CSS and base64-encoded PNG images.
+- Includes performance metrics, confusion matrix visualisation, feature importance plots.
+
+#### `notebook_generator.py` (103 lines)
+- Auto-generates Jupyter notebooks with 4 sections matching the analytics pillars.
+- AutoML: Correlation heatmaps, box plots, confusion matrix.
+- AutoDL: t-SNE embedding visualisation, classification report.
+
+#### `eda.py` (173 lines)
+- Target distribution plots (histogram for regression, bar for classification).
+- Feature distribution grid, correlation heatmap.
+- Saves plots to `reports/` directory.
+
+#### `confidence_calibration.py` (86 lines)
+- Computes Expected Calibration Error (ECE) using reliability diagrams.
+- Weighted combination: C(D) = w_sim · similarity + w_cons · consistency + w_agree · agreement.
+- Generates reliability curve plot, logs to W&B.
+
+---
+
+### 2.9 Agentic Pipeline
+
+#### `agents/agent_orchestrator.py` (122 lines) — `AgenticAutoMLOrchestrator`
+7-step pipeline:
+1. **DataAgent** → LLM-driven dataset profiling (target detection, problem type)
+2. **BusinessAgent** → Interactive business context gathering + ML objective translation
+3. **CriticAgent Phase 1** → Validates data + requirements (checks for metric mismatch, leakage)
+4. **FeatureAgent** → LLM-recommended FE plan (missing strategy, encoding, transformations)
+5. **ModelAgent** → Memory-augmented model selection (FAISS + LLM)
+6. **CriticAgent Phase 2** → Validates full pipeline (checks for leakage, resource mismatch)
+7. **Report Generation** → Consultant report aggregation
+
+Each agent uses `litellm.completion()` with strict JSON output schemas. All agents have robust fallback defaults if LLM parsing fails.
+
+#### `agents/critic_agent.py` (131 lines)
+- Adversarial validation with specific failure modes:
+  - Metric mismatch (RMSE for classification)
+  - Target leakage (target in features)
+  - Resource mismatch (500-layer NN for 100 rows)
+- Robust JSON parser: handles `<think>` tags, markdown blocks, keyword fallback.
+- Auto-approves on parsing failure to prevent pipeline deadlocks.
+
+---
+
+### 2.10 Experiment Tracking
+
+#### `wandb_logger.py` (57 lines)
+- Thin wrapper around W&B: `init_run()`, `log()`, `log_image()`, `log_table()`, `log_artifact()`, `finish()`, `alert()`.
+- All functions are no-ops when `USE_WANDB=False`.
+- Uses `WANDB_SILENT=true` to suppress console noise.
+
+---
+
+### 2.11 Utility & Build Scripts
+
+| File | Lines | Purpose |
+|---|---|---|
+| `build_memory.py` | 14675B | Pre-seeds FAISS memory from OpenML datasets |
+| `preseed_memory.py` | 4717B | Alternative memory seeding script |
+| `delete_memory.py` | 4844B | Interactive memory entry removal |
+| `extract_memory.py` | 4257B | Exports memory contents for analysis |
+| `update_memory_hparams.py` | 1952B | Updates hyperparameters in existing records |
+| `weight_search.py` | 5409B | Grid search for optimal cold-start weights |
+| `auto_dl_nas.py` | 3986B | Standalone NAS search space definition |
+| `routing_engine.py` | 3142B | Additional routing logic module |
+
+---
+
+## 3. Dependency Map
+
+```mermaid
+graph TD
+    A[phase4_pipeline] --> B[data_loader]
+    A --> C[data_cleaner]
+    A --> D[feature_engineering]
+    A --> E[feature_processing]
+    A --> F[model_trainer]
+    A --> G[cold_start / MemoryStore]
+    A --> H[dataset_embedding]
+    A --> I[task_encoder]
+    A --> J[paradigm_router]
+    A --> K[hpo_optuna]
+    A --> L[llm_suggester]
+    A --> M[llm_explainer]
+    A --> N[shap_explainer]
+    A --> O[multi_objective]
+    A --> P[multimodal_extractor]
+    A --> Q[notebook_generator]
+    A --> R[dataset_profiler]
+    A --> S[onboarding_agent]
+    A --> T[wandb_logger]
+    A --> U[dl_faiss_memory]
+    A --> V[heuristics]
+    
+    P --> W[domain_registry]
+    P --> X[lora_adapter_trainer]
+    X --> Y[lora_config]
+    
+    J --> L
+    J --> G
+    J --> V
+    
+    G --> H
+    I --> G
+    
+    Z[agent_orchestrator] --> AA[data_agent]
+    Z --> AB[business_agent]
+    Z --> AC[feature_agent]
+    Z --> AD[model_agent]
+    Z --> AE[critic_agent]
+    Z --> G
+```
+
+---
+
+## 4. Known Considerations
+
+### Architectural
+- `phase4_pipeline.py` is monolithic at 928 lines; the AutoML and AutoDL paths could be extracted into separate modules.
+- Legacy `main.py` duplicates some logic from `phase4_pipeline.py` — they serve different pipeline generations.
+
+### Security
+- API keys are managed via `.env` + `python-dotenv`. The `.env.example` file provides a template.
+- LLM calls gracefully degrade on failure (empty suggestions, auto-approve).
+
+### Performance
+- FAISS uses `IndexFlatL2` (brute-force). For >10K memory entries, consider `IndexIVFFlat`.
+- HPO subsamples to 15K rows for the AutoDL path.
+- Embedding cache prevents redundant extraction on re-runs.
+
+### Testing
+- Test coverage is limited to leakage detection and GPU placement.
+- No unit tests for core pipeline functions (feature engineering, meta-learning).
+
+---
+
+*End of codebase analysis.*
+]]>

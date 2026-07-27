@@ -3,6 +3,8 @@ import wandb
 import numpy as np
 import xgboost as xgb
 import lightgbm as lgb
+from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.metrics import f1_score
 
 class RegularizedObjective:
     def __init__(self, X_train, y_train, X_val, y_val, model_type):
@@ -12,31 +14,28 @@ class RegularizedObjective:
         self.y_val = y_val
         self.model_type = model_type
         
-        # Penalty configuration: Penalize heavily if gap > 5%
+        # Penalty configuration: Penalize heavily if F1 gap > 5%
         self.penalty_weight = 0.5 
         self.gap_threshold = 0.05
 
     def __call__(self, trial):
         # 1. Suggest hyperparameters based on model type
-        if self.model_type in ['xgb', 'lgbm']:
+        if self.model_type in ['xgb', 'lgbm', 'hgb']:
             params = self._suggest_tree_params(trial)
             if self.model_type == 'xgb':
                 model = xgb.XGBClassifier(**params, use_label_encoder=False, eval_metric='mlogloss')
-            else:
+            elif self.model_type == 'lgbm':
                 model = lgb.LGBMClassifier(**params)
-            
-            # 2. Train and Evaluate
-            model.fit(self.X_train, self.y_train)
-            train_score = model.score(self.X_train, self.y_train)
-            val_score = model.score(self.X_val, self.y_val)
+            elif self.model_type == 'hgb':
+                model = HistGradientBoostingClassifier(**params)
                 
         elif self.model_type == 'mlp':
-            import torch
-            import pytorch_lightning as pl
-            from torch.utils.data import DataLoader, TensorDataset
-            from metaautoml.models.lightning_downstream_mlp import LightningDownstreamMLP
-            
             params = self._suggest_mlp_params(trial)
+            from metaautoml.models.lightning_downstream_mlp import LightningDownstreamMLP
+            import torch
+            from torch.utils.data import DataLoader, TensorDataset
+            import pytorch_lightning as pl
+            
             num_classes = len(np.unique(self.y_train))
             model = LightningDownstreamMLP(
                 input_dim=self.X_train.shape[1], 
@@ -57,39 +56,46 @@ class RegularizedObjective:
             train_loader = DataLoader(train_dataset, batch_size=256, shuffle=True, num_workers=0)
             val_loader = DataLoader(val_dataset, batch_size=256, shuffle=False, num_workers=0)
             
-            # THE MAGIC: PyTorch Lightning Trainer
-            # precision='16-mixed' halves VRAM and speeds up training by ~2x
+            # PyTorch Lightning Trainer (GPU + 16-bit precision)
             trainer = pl.Trainer(
                 max_epochs=50,
                 accelerator='gpu' if torch.cuda.is_available() else 'cpu',
                 devices=1,
                 precision='16-mixed', 
-                enable_progress_bar=False, # Disable for HPO speed
+                enable_progress_bar=False,
                 enable_model_summary=False,
-                logger=False, # We use W&B at the study level, not per trial
+                logger=False,
                 callbacks=[pl.callbacks.EarlyStopping(monitor='val_acc', patience=5, mode='max')]
             )
             
             trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
-            
-            # Evaluate for Optuna
-            train_score = model.score(self.X_train, self.y_train)
-            val_score = model.score(self.X_val, self.y_val)
         else:
             raise ValueError(f"Unknown model type: {self.model_type}")
 
-        # 3. Calculate Generalization Gap & Apply Penalty
-        gen_gap = train_score - val_score
-        penalty = self.penalty_weight * max(0, gen_gap - self.gap_threshold)
-        optimized_metric = val_score - penalty
+        # 2. Generate Predictions (Class indices)
+        train_preds = model.predict(self.X_train)
+        val_preds = model.predict(self.X_val)
 
-        # 4. Log raw metrics to W&B for dashboard analysis (Phase 5.3 custom logs)
+        # 3. Calculate MACRO F1-SCORE (The crucial change)
+        # 'macro' calculates the F1 for each of the 102 classes independently, 
+        # then takes the unweighted mean. This forces the model to learn the hard classes!
+        train_f1 = f1_score(self.y_train, train_preds, average='macro', zero_division=0)
+        val_f1 = f1_score(self.y_val, val_preds, average='macro', zero_division=0)
+
+        # 4. Calculate Generalization Gap & Apply Penalty
+        gen_gap = train_f1 - val_f1
+        penalty = self.penalty_weight * max(0, gen_gap - self.gap_threshold)
+        
+        # The metric Optuna will actually maximize
+        optimized_metric = val_f1 - penalty
+
+        # 5. Log raw metrics to W&B for dashboard analysis (Phase 5.3 custom logs)
         wandb.log({
             "trial_number": trial.number,
             "model_type": self.model_type,
-            "raw_train_score": train_score,
-            "raw_val_score": val_score,
-            "generalization_gap": gen_gap,
+            "train_f1_macro": train_f1,
+            "val_f1_macro": val_f1,
+            "generalization_gap_f1": gen_gap,
             "penalty_applied": penalty,
             "optimized_metric": optimized_metric
         })
