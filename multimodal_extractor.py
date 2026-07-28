@@ -30,6 +30,35 @@ from concurrent.futures import ProcessPoolExecutor
 import multiprocessing as mp
 import cv2
 
+
+MODALITY_EXTENSIONS = {
+    "vision": {".jpg", ".jpeg", ".png", ".bmp", ".webp"},
+    "text": {".txt", ".md"},
+    "audio": {".wav", ".mp3", ".flac", ".ogg"},
+    "video": {".mp4", ".avi", ".mov", ".mkv"},
+}
+
+
+def discover_labeled_files(data_path, modality="vision"):
+    """Return media paths and class labels inferred from parent folders."""
+    data_path = os.path.abspath(data_path)
+    extensions = MODALITY_EXTENSIONS[modality]
+    files = []
+    labels = []
+    for root, _, filenames in os.walk(data_path):
+        if os.path.abspath(root) == data_path:
+            continue
+        label = os.path.basename(root)
+        if label.lower() == "images":
+            label = os.path.basename(os.path.dirname(root))
+        for filename in sorted(filenames):
+            path = os.path.join(root, filename)
+            if os.path.splitext(filename)[1].lower() in extensions:
+                files.append(path)
+                labels.append(label)
+    return files, labels
+
+
 class MultiModalDataset(Dataset):
     def __init__(self, file_paths, labels, modality='vision'):
         self.file_paths = file_paths
@@ -109,7 +138,7 @@ def _process_single_file(args):
 
 class UniversalEmbedder:
 
-    def __init__(self, device='cpu', batch_size=32, domain='general', max_files_per_class=None, modality='vision'):
+    def __init__(self, device='cpu', batch_size=32, domain='general', max_files_per_class=None, modality='vision', adapter_path=None):
         self.device = device
         self.batch_size = batch_size
         self.domain = domain
@@ -123,7 +152,8 @@ class UniversalEmbedder:
         
         #  UNIVERSAL ADAPTER LOADING 
         adapter_name = f"{modality}_{domain}_lora"
-        adapter_path = f"lora_adapters/{adapter_name}"
+        adapter_path = adapter_path or f"lora_adapters/{adapter_name}"
+        self.adapter_path = os.path.abspath(adapter_path) if os.path.exists(adapter_path) else None
         
         if os.path.exists(adapter_path):
             print(f"🔧 Loading {adapter_name} adapter...")
@@ -311,11 +341,107 @@ class UniversalEmbedder:
         print(f"🚀 [CPU Mode] Parallelizing extraction across CPU cores...")
         # Since pickling models is hard, we just fall back to fast extraction with num_workers=0 on CPU
         return self._extract_fast(files, labels, modality)
+
+    def embed_files(self, files, labels, modality, cache_key=None):
+        """Embed an explicit file subset so train/test isolation is preserved."""
+        if not files:
+            raise ValueError(f"No {modality} files were provided for embedding.")
+        cache_path = None
+        if cache_key:
+            adapter_signature = "frozen-base"
+            if self.adapter_path:
+                adapter_files = [
+                    path
+                    for path in glob.glob(
+                        os.path.join(self.adapter_path, "**", "*"),
+                        recursive=True,
+                    )
+                    if os.path.isfile(path)
+                ]
+                newest_mtime = max(
+                    (os.stat(path).st_mtime_ns for path in adapter_files),
+                    default=0,
+                )
+                total_size = sum(
+                    os.path.getsize(path) for path in adapter_files
+                )
+                adapter_signature = (
+                    f"{self.adapter_path}|{newest_mtime}|{total_size}"
+                )
+            file_signature = "|".join(
+                f"{os.path.abspath(path)}:{os.path.getmtime(path)}"
+                for path in files
+            )
+            identity = (
+                f"{cache_key}|{modality}|{self.domain}|{adapter_signature}|"
+                f"{file_signature}"
+            )
+            digest = hashlib.md5(identity.encode()).hexdigest()
+            os.makedirs("embedding_cache", exist_ok=True)
+            cache_path = os.path.join(
+                "embedding_cache", f"{modality}_{digest}.npz"
+            )
+            if os.path.exists(cache_path):
+                print(f"[Cache] Loading {cache_key} embeddings.")
+                cached = np.load(cache_path, allow_pickle=True)
+                X = pd.DataFrame(
+                    cached["X"],
+                    columns=[
+                        f"feat_{index}"
+                        for index in range(cached["X"].shape[1])
+                    ],
+                )
+                return X, pd.Series(cached["y"])
+
+        if self.device.type == "cpu":
+            X_raw, valid_labels = self._extract_cpu_parallel(
+                files, labels, modality
+            )
+        else:
+            X_raw, valid_labels = self._extract_fast(files, labels, modality)
+        if len(X_raw) == 0:
+            raise ValueError(
+                f"No valid {modality} embeddings could be extracted."
+            )
+
+        X_reduced = X_raw
+        X = pd.DataFrame(
+            X_reduced,
+            columns=[f"feat_{index}" for index in range(X_reduced.shape[1])],
+        )
+        y = pd.Series(valid_labels)
+        if cache_path:
+            np.savez_compressed(
+                cache_path, X=X_reduced, y=np.asarray(valid_labels)
+            )
+        return X, y
         
     def embed_directory(self, data_path, modality):
         # 1. Generate a unique hash for this dataset folder
         import hashlib
-        folder_hash = hashlib.md5(data_path.encode()).hexdigest()
+        adapter_signature = "frozen-base"
+        if self.adapter_path:
+            adapter_files = [
+                path
+                for path in glob.glob(
+                    os.path.join(self.adapter_path, "**", "*"),
+                    recursive=True,
+                )
+                if os.path.isfile(path)
+            ]
+            newest_mtime = max(
+                (os.stat(path).st_mtime_ns for path in adapter_files),
+                default=0,
+            )
+            total_size = sum(os.path.getsize(path) for path in adapter_files)
+            adapter_signature = (
+                f"{self.adapter_path}|{newest_mtime}|{total_size}"
+            )
+        cache_identity = (
+            f"{os.path.abspath(data_path)}|{modality}|{self.domain}|"
+            f"{adapter_signature}"
+        )
+        folder_hash = hashlib.md5(cache_identity.encode()).hexdigest()
         cache_dir = "embedding_cache"
         os.makedirs(cache_dir, exist_ok=True)
         cache_path = os.path.join(cache_dir, f"{modality}_{folder_hash}.npz")

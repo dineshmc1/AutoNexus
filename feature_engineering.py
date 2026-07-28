@@ -197,8 +197,12 @@ class FeatureEngineer:
     def _downcast_numerics(self, X: pd.DataFrame) -> pd.DataFrame:
         numerics = X.select_dtypes(include=['number'])
         for col in numerics.columns:
-            if X[col].dtype == np.float64: X[col] = X[col].astype(np.float32)
-            elif X[col].dtype == np.int64: X[col] = pd.to_numeric(X[col], downcast='integer')
+            if pd.api.types.is_float_dtype(X[col]):
+                # Ratios and polynomial terms can exceed float32. Keep float64
+                # and let the downstream imputer handle undefined values.
+                X[col] = X[col].replace([np.inf, -np.inf], np.nan).astype(np.float64)
+            elif X[col].dtype == np.int64:
+                X[col] = pd.to_numeric(X[col], downcast='integer')
         return X
 
     # ==========================================

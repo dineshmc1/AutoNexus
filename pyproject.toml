@@ -1,7 +1,66 @@
 [project]
 name = "automated-ml-pipeline"
 version = "0.1.0"
-description = "Add your description here"
+description = "A production-oriented CLI for automated tabular machine learning"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "joblib>=1.2",
+    "matplotlib>=3.6",
+    "nbformat>=5.9",
+    "numpy>=1.23",
+    "openpyxl>=3.0",
+    "pandas>=1.5",
+    "psutil>=5.9",
+    "scikit-learn>=1.2",
+    "scipy>=1.9",
+    "seaborn>=0.12",
+]
+
+[project.optional-dependencies]
+boosting = ["lightgbm>=4", "xgboost>=2"]
+reports = ["matplotlib>=3.6", "seaborn>=0.12", "shap>=0.42"]
+images = [
+    "librosa>=0.10",
+    "opencv-python>=4.8",
+    "peft>=0.10",
+    "pillow>=10",
+    "python-dotenv>=1",
+    "torch>=2",
+    "tqdm>=4.66",
+    "transformers>=4.40",
+]
+research = [
+    "faiss-cpu>=1.7",
+    "litellm",
+    "optuna",
+    "torch",
+    "transformers",
+    "wandb",
+]
+all = [
+    "faiss-cpu>=1.7",
+    "lightgbm>=4",
+    "litellm",
+    "librosa>=0.10",
+    "matplotlib>=3.6",
+    "opencv-python>=4.8",
+    "optuna",
+    "peft>=0.10",
+    "pillow>=10",
+    "python-dotenv>=1",
+    "seaborn>=0.12",
+    "shap>=0.42",
+    "torch",
+    "tqdm>=4.66",
+    "transformers",
+    "wandb",
+    "xgboost>=2",
+]
+
+[project.scripts]
+ml-builder = "main:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

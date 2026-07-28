@@ -1,102 +1,73 @@
-import nbformat
-from nbformat.v4 import new_notebook, new_markdown_cell, new_code_cell
-import os
+"""Generate a standalone notebook summarizing a completed ML-Builder run."""
 
-def generate_advanced_notebook(config: dict, results: dict, output_path: str):
-    nb = new_notebook()
-    modality = config.get("modality", "tabular")
-    paradigm = results.get("paradigm", "AutoML")
-    business_context = config.get("business_context", {})
-    
-    # 1. Executive Header
-    nb.cells.append(new_markdown_cell(f"# 📊 MetaAutoML Advanced Analysis Report\n**Dataset:** `{config.get('data_path', 'Unknown')}`\n**Modality:** {modality.upper()} | **Paradigm:** {paradigm}\n**Business Objective:** {business_context.get('business_objective', 'N/A')}"))
-    nb.cells.append(new_code_cell("""import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-from sklearn.metrics import classification_report, confusion_matrix, ConfusionMatrixDisplay
-try:
-    import shap
-except ImportError:
-    pass
-sns.set_theme(style='whitegrid')"""))
-    
-    # 2. Data Profiling & Quality
-    nb.cells.append(new_markdown_cell("## 1. DESCRIPTIVE ANALYTICS (What happened?)"))
-    nb.cells.append(new_markdown_cell("*Dataset context, size, class distribution, and data health.*"))
-    if modality == "tabular":
-        nb.cells.append(new_code_cell("""# Load & Profile
-X, y = results['X'], results['y']
-df = pd.DataFrame(X).copy() if not isinstance(X, pd.DataFrame) else X.copy()
-df['target'] = y
-print('Shape:', df.shape)
-print('Missing Values:\\n', df.isnull().sum())
-print('Class Distribution:\\n', df['target'].value_counts(normalize=True) * 100)"""))
-    else:
-        # FIX: Used triple quotes to avoid the 'len(results' crash
-        nb.cells.append(new_code_cell("""print('Modality:', '""" + modality + """')
-print('Total Samples:', len(results['y']))
-print('Classes:', len(set(results['y'])))
-print('Embedding Dimensions:', results['X'].shape[1])"""))
-        
-    # 3. Advanced EDA (Paradigm Specific)
-    nb.cells.append(new_markdown_cell("## 2. DIAGNOSTIC ANALYTICS (Why did it happen?)"))
-    nb.cells.append(new_markdown_cell("*Feature correlations, SHAP explanations, and error drivers.*"))
-    if paradigm == "AutoML":
-        nb.cells.append(new_code_cell("""# Correlation Heatmap & Feature Distributions
-if isinstance(X, pd.DataFrame):
-    plt.figure(figsize=(10,8))
-    sns.heatmap(X.corr(), cmap='coolwarm', annot=False)
-    plt.title('Feature Correlation Matrix')
-    plt.show()
+from __future__ import annotations
 
-    # Target vs Key Features
-    for col in X.columns[:3]:
-        plt.figure()
-        sns.boxplot(x=y, y=X[col])
-        plt.title(f'{col} vs Target')
-        plt.show()"""))
-    else:
-        nb.cells.append(new_code_cell("""# Embedding Space Visualization (t-SNE)
-from sklearn.manifold import TSNE
-X_embed = results.get('X')
-if X_embed is not None and len(X_embed) > 0:
-    tsne = TSNE(n_components=2, random_state=42)
-    X_2d = tsne.fit_transform(X_embed)
+import json
+from pathlib import Path
 
-    plt.figure(figsize=(10,8))
-    for cls in set(results['y']):
-        mask = np.array(results['y']) == cls
-        plt.scatter(X_2d[mask, 0], X_2d[mask, 1], label=f'Class {cls}', alpha=0.7)
-    plt.title('Multi-Modal Embedding Clustering (t-SNE)')
-    plt.legend()
-    plt.show()"""))
-        
-    # 4. Model Diagnostics & Error Analysis
-    nb.cells.append(new_markdown_cell("## 3. PREDICTIVE ANALYTICS (What will happen?)"))
-    nb.cells.append(new_markdown_cell("*Final evaluation metrics, Confusion Matrix, and real-world performance.*"))
-    nb.cells.append(new_code_cell("""# Confusion Matrix & Classification Report
-y_true, y_pred = results.get('y_test', results.get('y')), results.get('y_pred')
-if y_true is not None and y_pred is not None:
-    print(classification_report(y_true, y_pred))
 
-    fig, ax = plt.subplots(figsize=(8,6))
-    ConfusionMatrixDisplay.from_predictions(y_true, y_pred, ax=ax, cmap='Blues')
-    plt.title('Confusion Matrix')
-    plt.show()"""))
-    
-    # 5. Business Impact Simulation
-    nb.cells.append(new_markdown_cell("## 4. PRESCRIPTIVE ANALYTICS (What should we do next?)"))
-    nb.cells.append(new_markdown_cell("*Business recommendations, ROI simulation, and deployment advice.*"))
-    nb.cells.append(new_code_cell("""# ROI Simulation based on Success Metric
-metric = config.get('business_context', {}).get('success_metric', 'Accuracy')
-acc = results.get('final_accuracy', 0.0)
-if acc:
-    print(f'Estimated {metric}: {acc:.2%}')
-    print('Recommendation: ' + ('Deploy to production.' if acc > 0.90 else 'Collect more data or adjust domain extractor.' if acc > 0.75 else 'Re-evaluate feature extraction pipeline.'))"""))
-    
-    # Save
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    with open(output_path, 'w', encoding='utf-8') as f:
-        nbformat.write(nb, f)
-    print(f"📓 Advanced notebook saved to: {output_path}")
+def generate_advanced_notebook(
+    config: dict,
+    results: dict,
+    output_path: str,
+) -> str:
+    import nbformat
+    from nbformat.v4 import new_code_cell, new_markdown_cell, new_notebook
+
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    metrics_path = Path(results["metrics_path"]).resolve()
+    model_path = Path(results["model_path"]).resolve()
+    plot_paths = [
+        str(Path(path).resolve())
+        for path in results.get("plot_paths", [])
+        if path
+    ]
+    summary = results.get("summary", {})
+
+    notebook = new_notebook()
+    notebook.metadata["kernelspec"] = {
+        "display_name": "Python 3",
+        "language": "python",
+        "name": "python3",
+    }
+    notebook.cells = [
+        new_markdown_cell(
+            "# ML-Builder Analysis\n\n"
+            f"**Dataset:** `{config.get('data_path', 'unknown')}`  \n"
+            f"**Modality:** {config.get('modality', 'tabular')}  \n"
+            f"**Best model:** {results.get('best_model', 'unknown')}"
+        ),
+        new_code_cell(
+            "import json\n"
+            "from pathlib import Path\n"
+            "import pandas as pd\n"
+            "from IPython.display import Image, display\n\n"
+            f"summary = json.loads({json.dumps(json.dumps(summary))})\n"
+            "pd.Series(summary, name='value').to_frame()"
+        ),
+        new_markdown_cell("## Model Metrics"),
+        new_code_cell(
+            f"metrics_path = Path(r'{metrics_path}')\n"
+            "metrics = pd.read_csv(metrics_path)\n"
+            "metrics"
+        ),
+        new_markdown_cell("## Saved Model"),
+        new_code_cell(
+            f"model_path = Path(r'{model_path}')\n"
+            "print(f'Model artifact: {model_path}')\n"
+            "print(f'Exists: {model_path.exists()}')"
+        ),
+        new_markdown_cell("## Generated Plots"),
+        new_code_cell(
+            f"plot_paths = {plot_paths!r}\n"
+            "for plot in plot_paths:\n"
+            "    path = Path(plot)\n"
+            "    if path.exists():\n"
+            "        print(path.name)\n"
+            "        display(Image(filename=str(path)))"
+        ),
+    ]
+    nbformat.write(notebook, output)
+    print(f"[Notebook] Analysis notebook saved to: {output}")
+    return str(output)

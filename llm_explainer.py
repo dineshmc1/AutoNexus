@@ -1,111 +1,104 @@
-import litellm
-import os
+"""LLM-assisted Markdown reporting with a deterministic offline fallback."""
+
+from __future__ import annotations
+
 import json
-import wandb
+import os
+from pathlib import Path
+from typing import Any
 
-def generate_comprehensive_report(master_context, dataset_id):
-    """
-    Generates a Markdown report.
-    Checks if the run was Tabular (AutoML) or Deep Learning (AutoDL)
-    and selects the appropriate LLM prompt accordingly.
-    """
-    paradigm = master_context.get("paradigm_routing", {}).get("decision", "AutoML")
 
-    # ── AutoDL (Deep Learning) Prompt ──────────────────────────────────────────
-    if paradigm == "AutoDL":
-        system_prompt = """You are an Expert AI Consultant specialising in Deep Learning pipelines.
-    The system routed this dataset to the AutoDL (Deep Learning) path via the R(D) Paradigm Router.
-    Write a structured, professional Markdown report based EXACTLY on the provided JSON context.
-    Do not invent numbers or metrics that are not in the context.
+def _offline_report(context: dict[str, Any], error: str | None = None) -> str:
+    dataset = context.get("dataset", {})
+    performance = context.get("performance", {})
+    model = context.get("model", {})
+    resources = context.get("resources", {})
+    note = (
+        f"\n> LLM generation was unavailable: {error}\n"
+        if error else ""
+    )
+    return f"""# Model Explanation
+{note}
+## 1. Dataset
 
-    CRITICAL RULES:
-    1. You MUST output exactly 5 sections, numbered 1 to 5. Do not stop early.
-    2. DO NOT hallucinate. Use the exact numbers from the context.
-    3. Reference the modality (vision/audio/text/video) and the specific extractor used.
+- Dataset: `{dataset.get("path", "unknown")}`
+- Modality: {dataset.get("modality", "tabular")}
+- Samples: {dataset.get("samples", "unknown")}
+- Features: {dataset.get("features", "unknown")}
+- Problem type: {dataset.get("problem_type", "unknown")}
 
-    Structure your report exactly with these headings:
+## 2. Selected Model
 
-    # 1. Executive Summary & Dataset Context
-    (Describe the dataset modality, the extractor used to convert raw media into tabular embeddings,
-    the number of samples and classes discovered, and any observations about class balance).
+The pipeline selected **{model.get("name", "unknown")}** after baseline
+screening and cross-validation.
 
-    # 2. Why Deep Learning Was Chosen
-    (Explain the R(D) Router score and why the Classical ML path was bypassed.
-    Unstructured data produces dense, high-dimensional embedding vectors that standard
-    tabular AutoML pipelines are not designed to exploit — explain this in business-friendly terms).
+## 3. Performance
 
-    # 3. Neural Architecture Search (NAS) Results
-    (Detail the best architecture found: number of layers, hidden dimension, dropout rate,
-    learning rate, and batch size. Explain what each hyperparameter means for model quality
-    and generalisation. Quote the best NAS utility score).
+- Training metric: {performance.get("training", "N/A")}
+- Validation metric: {performance.get("validation", "N/A")}
+- Testing metric: {performance.get("testing", "N/A")}
 
-    # 4. Final Production Model Performance
-    (Present the final test accuracy, the full classification report, and interpret the
-    confusion matrix. Call out any class the model struggles with and hypothesise why).
+The validation metric estimates generalization during model selection. The
+testing metric is the final held-out estimate and should be used for deployment
+decisions. A large training-to-validation gap can indicate overfitting.
 
-    # 5. Compute Efficiency & Recommendations
-    (Explain how the PCA + lightweight MLP approach achieves competitive accuracy far faster
-    than training a massive CNN from scratch. Suggest one concrete next step to push accuracy
-    further, e.g. fine-tuning the backbone, data augmentation, or ensembling).
-    """
+## 4. Resources
 
-    # ── Tabular (AutoML) Prompt ─────────────────────────────────────────────────
-    else:
-        system_prompt = """You are an Expert AI Consultant. Write a comprehensive Markdown report structured EXACTLY into these 4 pillars:
+- Training time: {resources.get("training_seconds", "N/A")} seconds
+- Peak RAM: {resources.get("ram_peak_mb", "N/A")} MiB
+- Peak VRAM: {resources.get("vram_peak_mb", "N/A")} MiB
 
-# 1. DESCRIPTIVE ANALYTICS (What happened?)
-- Dataset context, size, class distribution, and data health.
+## 5. Recommendations
 
-# 2. DIAGNOSTIC ANALYTICS (Why did it happen?)
-- Why did the model make certain mistakes? Analyze the Confusion Matrix and SHAP values. What features drove the predictions?
+Review the class distribution and confusion matrix before deployment. Validate
+the model on recent production-like data, monitor drift, and retrain when the
+input distribution or target behavior changes.
+"""
 
-# 3. PREDICTIVE ANALYTICS (What will happen?)
-- Present the final evaluation metrics (Accuracy, F1, ROC-AUC, etc.). How will this model perform in the real world?
 
-# 4. PRESCRIPTIVE ANALYTICS (What should we do next?)
-- Concrete business recommendations. Should we deploy? Do we need more data? What are the ROI implications?
+def generate_comprehensive_report(
+    master_context: dict[str, Any],
+    dataset_id: str,
+    output_path: str | None = None,
+    use_llm: bool = True,
+) -> str:
+    """Generate and save a Markdown report, falling back safely offline."""
+    report_md: str
+    failure: str | None = None
 
-Use the provided JSON context to fill these sections. DO NOT hallucinate."""
-
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": f"Generate the comprehensive report based on this run metadata:\n{json.dumps(master_context, indent=2)}"}
-    ]
-    
-    # Use LLM configuration from config.py if available, otherwise default
-    try:
-        from config import LLM_MODEL
-    except ImportError:
-        LLM_MODEL = "openrouter/deepseek/deepseek-r1-distill-llama-70b"
-
-    print(f"  [LLM] Generating Consultant Report for Dataset {dataset_id}...")
-    try:
-        response = litellm.completion(
-            model=os.getenv("LLM_MODEL", LLM_MODEL), 
-            messages=messages,
-            temperature=0.4,
-            max_tokens=3000
-        )
-        report_md = response.choices[0].message.content.strip()
-    except Exception as e:
-        print(f"  [LLM] Report Generation Failed: {str(e)}")
-        report_md = f"LLM Report Generation Failed: {str(e)}"
-        
-    # Save to local disk
-    os.makedirs("reports", exist_ok=True)
-    report_path = f"reports/{dataset_id}_consultant_report.md"
-    with open(report_path, "w", encoding="utf-8") as f:
-        f.write(report_md)
-
-    # Log to W&B (only if an active run exists)
-    if wandb.run is not None:
+    if use_llm:
         try:
-            wandb.log({
-                f"consultant_report/{dataset_id}": wandb.Html(f"<pre style='white-space: pre-wrap; font-family: sans-serif;'>{report_md}</pre>")
-            })
-        except Exception as e:
-            print(f"  [W&B] Failed to log consultant report: {e}")
-    else:
-        print("  [W&B] Skipped logging report (No active W&B run).")
+            import litellm
+            from config import LLM_MODEL
 
-    return report_md
+            system_prompt = """You are an expert ML consultant. Produce a
+professional Markdown report with exactly five sections: Dataset, Model
+Selection, Performance, Explainability, and Deployment Recommendations. Use
+only values in the supplied JSON. Clearly distinguish training, validation,
+and testing metrics. Do not invent facts."""
+            response = litellm.completion(
+                model=os.getenv("LLM_MODEL", LLM_MODEL),
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {
+                        "role": "user",
+                        "content": json.dumps(master_context, indent=2),
+                    },
+                ],
+                temperature=0.3,
+                max_tokens=2500,
+            )
+            report_md = response.choices[0].message.content.strip()
+            print(f"[LLM] Consultant report generated with {os.getenv('LLM_MODEL', LLM_MODEL)}.")
+        except Exception as exc:
+            failure = str(exc)
+            print(f"[LLM] Unavailable; writing offline explanation: {failure}")
+            report_md = _offline_report(master_context, failure)
+    else:
+        report_md = _offline_report(master_context)
+
+    path = Path(output_path or f"reports/{dataset_id}_consultant_report.md")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(report_md, encoding="utf-8")
+    print(f"[Report] Markdown explanation saved to: {path}")
+    return str(path)

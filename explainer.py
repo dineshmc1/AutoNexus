@@ -26,13 +26,17 @@ from sklearn.pipeline import Pipeline
 
 def _extract_model(pipeline: Pipeline) -> Any:
     """Get the final estimator from a Pipeline."""
-    return pipeline.named_steps.get("model", pipeline[-1])
+    estimator = getattr(pipeline, "estimator", pipeline)
+    if hasattr(estimator, "named_steps"):
+        return estimator.named_steps.get("model", estimator)
+    return estimator
 
 
 def _get_feature_names(pipeline: Pipeline, fallback_n: int) -> List[str]:
     """Try to extract feature names from the preprocessor."""
     try:
-        preprocessor = pipeline.named_steps.get("preprocessor", pipeline[0])
+        estimator = getattr(pipeline, "estimator", pipeline)
+        preprocessor = estimator.named_steps.get("preprocessor", estimator[0])
         return list(preprocessor.get_feature_names_out())
     except Exception:
         return [f"feature_{i}" for i in range(fallback_n)]
@@ -46,10 +50,15 @@ def plot_feature_importance(
     top_n: int = 20,
 ) -> str:
     # Get the final estimator from a Pipeline.
+    estimator = getattr(pipeline, "estimator", pipeline)
     model = _extract_model(pipeline)
-    X_transformed = pipeline.named_steps.get(
-        "preprocessor", pipeline[0]
-    ).transform(X_test)
+    if hasattr(estimator, "named_steps"):
+        X_transformed = estimator.named_steps.get(
+            "preprocessor", estimator[0]
+        ).transform(X_test)
+    else:
+        model = pipeline
+        X_transformed = X_test
     feature_names = _get_feature_names(pipeline, X_transformed.shape[1])
 
     if hasattr(model, "feature_importances_"):

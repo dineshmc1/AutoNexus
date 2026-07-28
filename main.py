@@ -1,36 +1,32 @@
-"""
-main.py
-=======
-CLI entry point that orchestrates the full MLBuilder pipeline:
+"""Production command-line entry point for ML-Builder.
 
-    load → clean → (optional) feature engineering → feature process
-    → baseline screen → full train → evaluate → (optional) tune
-    → save best model → (optional) EDA + explainability + HTML report.
-
-Usage
------
-::
-
-    python main.py --dataset data.csv --target label
-    python main.py --dataset data.csv --target label --enable_fe --report
-    python main.py --dataset data.csv --target price --enable_fe --outlier_strategy cap --report --no-shap
+Examples:
+    python main.py data.csv --target outcome
+    python main.py --target outcome
+    python main.py data.xlsx --target price --problem-type regression --tune
+    ml-builder data.csv --target label --models logistic,rf,gb --report
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
+import logging
 import sys
 import time
-from typing import Optional
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any
 
+import numpy as np
 import pandas as pd
+from sklearn.metrics import accuracy_score, r2_score
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
 
-from data_loader import load_dataset
 from data_cleaner import clean
-from feature_processing import build_preprocessor, select_features
-from model_trainer import get_models, baseline_screen, full_train
+from data_loader import DataBundle, load_dataset
+from feature_processing import build_preprocessor
 from model_selector import (
     evaluate_models,
     save_metrics,
@@ -38,448 +34,835 @@ from model_selector import (
     select_best,
     tune_top_models,
 )
+from model_trainer import baseline_screen, full_train, get_models
 from resource_manager import ResourceManager
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _parse_time(value: Optional[str]) -> Optional[float]:
-    """Convert a human-friendly time string (e.g. ``'10m'``) to seconds."""
-    if value is None:
-        return None
-    value = value.strip().lower()
-    if value.endswith("m"):
-        return float(value[:-1]) * 60
-    if value.endswith("s"):
-        return float(value[:-1])
-    if value.endswith("h"):
-        return float(value[:-1]) * 3600
-    return float(value) * 60
+LOGGER = logging.getLogger("ml_builder")
 
 
-def _load_config(path: str = "config.json") -> dict:
-    """Load configuration from a JSON file if it exists."""
-    if os.path.isfile(path):
-        with open(path, "r") as fh:
-            cfg = json.load(fh)
-        print(f"[Config] Loaded settings from {path}")
-        return cfg
-    return {}
+def _configure_stdio() -> None:
+    """Make legacy progress output safe on Windows and redirected terminals."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="replace")
 
 
-def _print_results(results: pd.DataFrame, problem_type: str) -> None:
-    """Pretty-print the evaluation results table."""
-    print("\n" + "=" * 72)
-    print("  MODEL EVALUATION RESULTS")
-    print("=" * 72)
+@dataclass(frozen=True)
+class RunConfig:
+    dataset: Path
+    target: str | None
+    output_dir: Path
+    problem_type: str | None
+    models: list[str]
+    test_size: float
+    sample_fraction: float
+    cv: int
+    max_time_seconds: float | None
+    random_state: int
+    feature_engineering: bool
+    interactions: int | None
+    ratios: bool
+    outlier_strategy: str
+    tune: bool
+    tune_method: str
+    tune_iterations: int
+    report: bool
+    shap: bool
+    llm: bool
+    notebook: bool
+    adapt_lora: bool
 
-    if problem_type == "classification":
-        cols = ["model", "accuracy", "precision", "recall", "f1", "roc_auc"]
-    else:
-        cols = ["model", "rmse", "mae", "r2"]
 
-    display = results[[c for c in cols if c in results.columns]].copy()
-
-    for col in display.columns:
-        if col != "model" and display[col].dtype in ("float64", "float32"):
-            display[col] = display[col].apply(
-                lambda x: f"{x:.4f}" if pd.notna(x) else "N/A"
-            )
-
-    print(display.to_string(index=False))
-    print("=" * 72 + "\n")
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return parsed
 
 
-# CLI argument parser
+def _fraction(value: str) -> float:
+    parsed = float(value)
+    if not 0 < parsed < 1:
+        raise argparse.ArgumentTypeError("must be between 0 and 1")
+    return parsed
+
+
+def _duration(value: str) -> float:
+    """Parse a duration such as 30s, 10m, or 2h into seconds."""
+    normalized = value.strip().lower()
+    multipliers = {"s": 1.0, "m": 60.0, "h": 3600.0}
+    suffix = normalized[-1]
+    try:
+        if suffix in multipliers:
+            seconds = float(normalized[:-1]) * multipliers[suffix]
+        else:
+            seconds = float(normalized) * 60.0
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "use seconds, minutes, or hours, for example: 30s, 10m, 2h"
+        ) from exc
+    if seconds <= 0:
+        raise argparse.ArgumentTypeError("must be greater than zero")
+    return seconds
+
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
-        description="MLBuilder — Automated Machine Learning Pipeline",
-        formatter_class=argparse.RawTextHelpFormatter,
+    parser = argparse.ArgumentParser(
+        prog="ml-builder",
+        description="Train and evaluate tabular ML models from one command.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    # Phase 1
-    p.add_argument("--dataset", type=str, required=True, help="Path to CSV or Excel dataset.")
-    p.add_argument("--target", type=str, required=True, help="Name of the target column.")
-    p.add_argument("--models", type=str, default=None,
-                   help="Comma-separated model keys (e.g. logistic,rf,gb). Default: all.")
-    p.add_argument("--sample", type=float, default=None, help="Subsample fraction for baseline screening (0-1).")
-    p.add_argument("--cv", type=int, default=None, help="Number of cross-validation folds.")
-    p.add_argument("--max_time", type=str, default=None, help="Max training wall-clock time (e.g. 10m, 30s).")
-    p.add_argument("--tune", action="store_true", help="Enable hyperparameter tuning for top models.")
-    p.add_argument("--tune_method", type=str, default=None, choices=["grid", "randomized"],
-                   help="Tuning strategy (default: randomized).")
-    p.add_argument("--feature_select", type=str, default=None, help="Feature selection method (mutual_info).")
-    p.add_argument("--feature_k", type=int, default=None, help="Number of features to select.")
-    p.add_argument("--test_size", type=float, default=None, help="Test split fraction.")
-    p.add_argument("--output_dir", type=str, default=None, help="Directory for saved model & metrics.")
-    p.add_argument("--config", type=str, default="config.json", help="Path to config JSON file.")
-    p.add_argument("--report", action="store_true", help="Generate EDA + explainability HTML report.")
-    p.add_argument("--no-shap", action="store_true", dest="no_shap", help="Skip SHAP plots (faster).")
-    p.add_argument("--enable_fe", action="store_true", help="Enable smart feature engineering.")
-    p.add_argument("--cardinality_threshold", type=float, default=None,
-                   help="Unique-ratio threshold for high-cardinality encoding (default: 0.05).")
-    p.add_argument("--skew_threshold", type=float, default=None,
-                   help="Skewness threshold for log transform (default: 1.0).")
-    p.add_argument("--interaction_features", type=int, default=None,
-                   help="Top-k numeric features for pairwise interactions (0 = off).")
-    p.add_argument("--outlier_strategy", type=str, default=None,
-                   choices=["cap", "none"], help="Outlier handling: cap or none.")
-    p.add_argument("--encoding_strategy", type=str, default=None,
-                   choices=["target", "frequency"], help="High-cardinality encoding: target or frequency.")
-    p.add_argument("--fe_level", type=str, default="auto", choices=["auto", "light", "medium", "full"],
-                   help="Feature engineering level (default: auto).")
-    p.add_argument("--enable_ratios", action="store_true", help="Enable generating ratio features.")
-    p.add_argument("--feature_selection_threshold", type=float, default=0.0,
-                   help="Drop features with importance below this threshold after baseline (default: 0.0).")
-    p.add_argument("--skip_cv_large", action="store_true", help="Skip cross validation for large datasets.")
-    return p
-
-
-# Main pipeline
-
-def run_pipeline(args: argparse.Namespace) -> None:
-    """Execute the end-to-end MLBuilder pipeline."""
-    wall_start = time.time()
-
-    # merge CLI args over config defaults 
-    cfg = _load_config(args.config)
-    dataset_path = args.dataset or cfg.get("dataset")
-    target_col = args.target or cfg.get("target")
-    model_names = (
-        args.models.split(",") if args.models else cfg.get("models", ["all"])
+    parser.add_argument(
+        "dataset",
+        type=Path,
+        nargs="?",
+        help="CSV or Excel dataset path; prompted for when omitted",
     )
-    sample_frac = args.sample or cfg.get("sample_fraction", 0.3)
-    cv_folds = args.cv or cfg.get("cv_folds", 5)
-    max_time = _parse_time(args.max_time) or (
-        cfg.get("max_time_minutes", None)
-        and cfg["max_time_minutes"] * 60
+    parser.add_argument(
+        "--target",
+        help="Target column for tabular data; prompted for when omitted",
     )
-    do_tune = args.tune or cfg.get("tune", False)
-    tune_method = args.tune_method or cfg.get("tune_method", "randomized")
-    tune_iter = cfg.get("tune_iter", 20)
-    feat_select = args.feature_select or cfg.get("feature_selection", None)
-    feat_k = args.feature_k or cfg.get("feature_selection_k", 10)
-    test_size = args.test_size or cfg.get("test_size", 0.2)
-    output_dir = args.output_dir or cfg.get("output_dir", "models")
-    random_state = cfg.get("random_state", 42)
-    save_csv = cfg.get("save_metrics_csv", True)
-    do_report = True
-    skip_shap = getattr(args, "no_shap", False) or cfg.get("no_shap", False)
-    reports_dir = cfg.get("reports_dir", "reports")
-    do_fe = getattr(args, "enable_fe", False) or cfg.get("enable_fe", False)
-    cardinality_thr = args.cardinality_threshold or cfg.get("cardinality_threshold", 0.05)
-    skew_thr = args.skew_threshold or cfg.get("skew_threshold", 1.0)
-    interaction_k = (args.interaction_features if args.interaction_features is not None
-                     else cfg.get("interaction_features", 0))
-    outlier_strat = args.outlier_strategy or cfg.get("outlier_strategy", "cap")
-    encoding_strat = args.encoding_strategy or cfg.get("encoding_strategy", "frequency")
-    fe_level_arg = args.fe_level or cfg.get("fe_level", "auto")
-    enable_ratios = getattr(args, "enable_ratios", False) or cfg.get("enable_ratios", False)
-    feat_sel_threshold = args.feature_selection_threshold or cfg.get("feature_selection_threshold", 0.0)
-    skip_cv_large = getattr(args, "skip_cv_large", False) or cfg.get("skip_cv_large", False)
+    parser.add_argument(
+        "--output-dir", type=Path, default=Path("artifacts"),
+        help="Directory for the model, metrics, and run manifest",
+    )
+    parser.add_argument(
+        "--problem-type", choices=("classification", "regression"),
+        help="Override automatic task detection",
+    )
+    parser.add_argument(
+        "--models",
+        help="Comma-separated model keys; omit to use resource-aware defaults",
+    )
+    parser.add_argument("--test-size", type=_fraction, default=0.2)
+    parser.add_argument("--sample", type=_fraction, default=0.3)
+    parser.add_argument("--cv", type=_positive_int, default=5)
+    parser.add_argument(
+        "--max-time", type=_duration,
+        help="Training budget, for example 30s, 10m, or 2h",
+    )
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--feature-engineering", action=argparse.BooleanOptionalAction,
+        default=False, help="Enable adaptive feature engineering",
+    )
+    parser.add_argument(
+        "--interactions", type=int,
+        help="Maximum source features used for interactions",
+    )
+    parser.add_argument(
+        "--ratios", action=argparse.BooleanOptionalAction, default=False,
+        help="Generate ratio features when feature engineering is enabled",
+    )
+    parser.add_argument(
+        "--outlier-strategy", choices=("cap", "none"), default="cap",
+    )
+    parser.add_argument(
+        "--tune", action=argparse.BooleanOptionalAction, default=False,
+        help="Tune the two strongest trained models",
+    )
+    parser.add_argument(
+        "--tune-method", choices=("grid", "randomized"), default="randomized",
+    )
+    parser.add_argument("--tune-iterations", type=_positive_int, default=20)
+    parser.add_argument(
+        "--report", action=argparse.BooleanOptionalAction, default=True,
+        help="Generate EDA and an HTML report",
+    )
+    parser.add_argument(
+        "--shap", action=argparse.BooleanOptionalAction, default=False,
+        help="Include SHAP plots in the report",
+    )
+    parser.add_argument(
+        "--llm", action=argparse.BooleanOptionalAction, default=True,
+        help="Generate a Markdown explanation using the configured LLM",
+    )
+    parser.add_argument(
+        "--notebook", action=argparse.BooleanOptionalAction, default=True,
+        help="Generate a standalone analysis notebook",
+    )
+    parser.add_argument(
+        "--adapt-lora",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Fine-tune LoRA for image data with explicit train/test folders",
+    )
+    parser.add_argument(
+        "--log-level", choices=("DEBUG", "INFO", "WARNING", "ERROR"),
+        default="INFO",
+    )
+    return parser
 
-    # Step count
-    base_steps = 7 if do_fe else 6
-    total_steps = base_steps + (2 if do_report else 0)
 
-    if not dataset_path or not target_col:
-        print("ERROR: --dataset and --target are required.")
-        sys.exit(1)
+def _config_from_args(args: argparse.Namespace) -> RunConfig:
+    dataset = args.dataset
+    if dataset is None:
+        try:
+            entered_path = input("Dataset path (CSV, Excel, or image folder): ").strip()
+        except EOFError as exc:
+            raise ValueError(
+                "Dataset path is required when input is non-interactive."
+            ) from exc
+        if not entered_path:
+            raise ValueError("Dataset path cannot be empty.")
+        dataset = Path(entered_path.strip('"').strip("'"))
 
-    step = 0
+    dataset = dataset.expanduser().resolve()
+    target = args.target
+    if dataset.is_file() and target is None:
+        try:
+            target = input("Target column: ").strip()
+        except EOFError as exc:
+            raise ValueError(
+                "Target column is required for tabular data."
+            ) from exc
+        if not target:
+            raise ValueError("Target column cannot be empty for tabular data.")
 
-    # 1. Load dataset 
-    step += 1
-    print("\n" + "─" * 72)
-    print(f"  STEP {step} / {total_steps} — Loading dataset")
-    print("─" * 72)
+    models = []
+    if args.models:
+        models = [name.strip() for name in args.models.split(",") if name.strip()]
+    if args.interactions is not None and args.interactions < 0:
+        raise ValueError("--interactions cannot be negative")
+    return RunConfig(
+        dataset=dataset,
+        target=target,
+        output_dir=args.output_dir.expanduser().resolve(),
+        problem_type=args.problem_type,
+        models=models,
+        test_size=args.test_size,
+        sample_fraction=args.sample,
+        cv=args.cv,
+        max_time_seconds=args.max_time,
+        random_state=args.seed,
+        feature_engineering=args.feature_engineering,
+        interactions=args.interactions,
+        ratios=args.ratios,
+        outlier_strategy=args.outlier_strategy,
+        tune=args.tune,
+        tune_method=args.tune_method,
+        tune_iterations=args.tune_iterations,
+        report=args.report,
+        shap=args.shap,
+        llm=args.llm,
+        notebook=args.notebook,
+        adapt_lora=args.adapt_lora,
+    )
+
+
+def _display_results(results: pd.DataFrame, problem_type: str) -> None:
+    preferred = (
+        ["model", "accuracy", "precision", "recall", "f1", "roc_auc"]
+        if problem_type == "classification"
+        else ["model", "rmse", "mae", "r2"]
+    )
+    columns = [column for column in preferred if column in results.columns]
+    print("\nModel results")
+    print(results[columns].round(4).to_string(index=False))
+
+
+def _write_manifest(
+    config: RunConfig,
+    problem_type: str,
+    best_model: str,
+    elapsed_seconds: float,
+    run_summary: dict[str, Any],
+) -> Path:
+    path = config.output_dir / "run.json"
+    payload = asdict(config)
+    payload["dataset"] = str(config.dataset)
+    payload["output_dir"] = str(config.output_dir)
+    payload.update(
+        problem_type=problem_type,
+        best_model=best_model,
+        elapsed_seconds=round(elapsed_seconds, 3),
+        run_summary=run_summary,
+    )
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return path
+
+
+def _memory_usage() -> dict[str, float | None]:
+    """Return current/peak process RAM and CUDA VRAM in MiB."""
+    ram_current = None
+    ram_peak = None
+    try:
+        import psutil
+
+        memory = psutil.Process().memory_info()
+        ram_current = memory.rss / (1024 ** 2)
+        peak_bytes = getattr(memory, "peak_wset", memory.rss)
+        ram_peak = peak_bytes / (1024 ** 2)
+    except ImportError:
+        pass
+
+    vram_current = None
+    vram_peak = None
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            vram_current = torch.cuda.memory_allocated() / (1024 ** 2)
+            vram_peak = torch.cuda.max_memory_allocated() / (1024 ** 2)
+    except ImportError:
+        pass
+
+    return {
+        "ram_current_mb": ram_current,
+        "ram_peak_mb": ram_peak,
+        "vram_current_mb": vram_current,
+        "vram_peak_mb": vram_peak,
+    }
+
+
+def _format_usage(value: float | None) -> str:
+    return "N/A" if value is None else f"{value:.1f} MiB"
+
+
+def _load_image_dataset(config: RunConfig) -> tuple[DataBundle, pd.DataFrame]:
+    """Embed a class-folder image dataset and return a standard data bundle."""
+    image_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+    image_count = sum(
+        1
+        for path in config.dataset.rglob("*")
+        if path.is_file() and path.suffix.lower() in image_extensions
+    )
+    if image_count < 10:
+        raise ValueError(
+            "Image dataset must contain at least 10 supported images "
+            "(.jpg, .jpeg, .png, .bmp, or .webp)."
+        )
+
+    try:
+        import torch
+        from multimodal_extractor import (
+            UniversalEmbedder,
+            discover_labeled_files,
+        )
+    except ImportError as exc:
+        raise RuntimeError(
+            "Image training dependencies are missing. Run: uv sync --extra images"
+        ) from exc
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"[Input] Detected image dataset ({image_count} files); device={device}.")
+    train_dir = config.dataset / "train"
+    val_dir = config.dataset / "val"
+    test_dir = config.dataset / "test"
+    explicit_split = train_dir.is_dir() and test_dir.is_dir()
+    if explicit_split:
+        train_files, train_labels = discover_labeled_files(
+            str(train_dir), "vision"
+        )
+        val_files, val_labels = (
+            discover_labeled_files(str(val_dir), "vision")
+            if val_dir.is_dir()
+            else ([], [])
+        )
+        test_files, test_labels = discover_labeled_files(
+            str(test_dir), "vision"
+        )
+        development_files = train_files + val_files
+        development_labels = train_labels + val_labels
+        lora_files, lora_labels = train_files, train_labels
+        print(
+            f"[Split] Using folders: {len(development_files)} development, "
+            f"{len(test_files)} test images."
+        )
+    else:
+        all_files, all_labels = discover_labeled_files(
+            str(config.dataset), "vision"
+        )
+        if len(set(all_labels)) < 2:
+            raise ValueError(
+                "Image classification requires at least two class folders."
+            )
+        indices = np.arange(len(all_files))
+        try:
+            development_idx, test_idx = train_test_split(
+                indices,
+                test_size=config.test_size,
+                random_state=config.random_state,
+                stratify=all_labels,
+            )
+        except ValueError as exc:
+            raise ValueError(
+                "Automatic image splitting failed. Each class needs enough "
+                "images for development and test sets."
+            ) from exc
+        development_files = [all_files[index] for index in development_idx]
+        development_labels = [
+            all_labels[index] for index in development_idx
+        ]
+        test_files = [all_files[index] for index in test_idx]
+        test_labels = [all_labels[index] for index in test_idx]
+        lora_files, lora_labels = development_files, development_labels
+        print(
+            f"[Split] Automatically reserved {len(test_files)} untouched "
+            f"test images; {len(development_files)} development images."
+        )
+
+    adapter_path = None
+    if config.adapt_lora:
+        from lora_adapter_trainer import train_universal_lora
+
+        adapter_path = config.output_dir / "lora_adapter"
+        train_universal_lora(
+            modality="vision",
+            domain="general",
+            data_dir=str(config.dataset),
+            output_path=str(adapter_path),
+            files=lora_files,
+            labels=lora_labels,
+        )
+
+    embedder = UniversalEmbedder(
+        device=device,
+        batch_size=32,
+        domain="general",
+        modality="vision",
+        adapter_path=str(adapter_path) if adapter_path else None,
+    )
+    X, labels = embedder.embed_files(
+        development_files,
+        development_labels,
+        "vision",
+        cache_key=f"{config.dataset}:development:{config.random_state}",
+    )
+    X_test, test_labels = embedder.embed_files(
+        test_files,
+        test_labels,
+        "vision",
+        cache_key=f"{config.dataset}:test:{config.random_state}",
+    )
+    labels = pd.Series(labels, name="label").astype(str)
+    test_labels = pd.Series(test_labels, name="label").astype(str)
+    class_counts = labels.value_counts()
+    if len(class_counts) < 2:
+        raise ValueError(
+            "Image classification requires at least two class subfolders."
+        )
+    if class_counts.min() < 2:
+        raise ValueError(
+            "Each image class must contain at least two valid images."
+        )
+
+    encoder = LabelEncoder().fit(labels)
+    y = pd.Series(encoder.transform(labels), name="label")
+    unseen = sorted(set(test_labels) - set(encoder.classes_))
+    if unseen:
+        raise ValueError(f"Test split contains unseen classes: {unseen}")
+    y_test = pd.Series(encoder.transform(test_labels), name="label")
+    bundle = DataBundle(
+        X_train=X.reset_index(drop=True),
+        X_test=X_test.reset_index(drop=True),
+        y_train=y.reset_index(drop=True),
+        y_test=y_test.reset_index(drop=True),
+        problem_type="classification",
+        feature_names=list(X.columns),
+        target_name="label",
+    )
+    raw_df = pd.concat([X, X_test], ignore_index=True)
+    raw_df["label"] = pd.concat(
+        [labels, test_labels], ignore_index=True
+    ).to_numpy()
+    return bundle, raw_df
+
+
+def _load_input(config: RunConfig) -> tuple[DataBundle, pd.DataFrame]:
+    if not config.dataset.exists():
+        raise FileNotFoundError(f"Dataset not found: {config.dataset}")
+    if config.dataset.is_dir():
+        return _load_image_dataset(config)
+    if config.target is None:
+        raise ValueError("Target column is required for tabular data.")
+
     bundle = load_dataset(
-        dataset_path, target_col, test_size=test_size,
-        random_state=random_state,
+        str(config.dataset),
+        config.target,
+        test_size=config.test_size,
+        random_state=config.random_state,
+        problem_type=config.problem_type,
     )
-
-    # Keep raw data for EDA (before cleaning)
-    raw_df = pd.concat([bundle.X_train, bundle.X_test], ignore_index=True)
-    raw_df[target_col] = pd.concat(
-        [bundle.y_train, bundle.y_test], ignore_index=True,
+    raw_df = pd.concat(
+        [
+            bundle.X_train.assign(**{bundle.target_name: bundle.y_train.to_numpy()}),
+            bundle.X_test.assign(**{bundle.target_name: bundle.y_test.to_numpy()}),
+        ],
+        ignore_index=True,
     )
+    return bundle, raw_df
 
-    # 2. Clean data 
-    step += 1
-    print("\n" + "─" * 72)
-    print(f"  STEP {step} / {total_steps} — Cleaning data")
-    print("─" * 72)
-    X_train_clean, y_train_clean = clean(bundle.X_train, bundle.y_train)
-    X_test_clean, y_test_clean = clean(bundle.X_test, bundle.y_test, verbose=False)
 
-    # 2.5 Resource-Aware Engine Analysis
-    rm = ResourceManager(
-        max_onehot_features=cfg.get("max_onehot_features", 5000),
-        low_cardinality_threshold=cfg.get("low_cardinality_threshold", 0.01),
-        high_cardinality_threshold=cfg.get("high_cardinality_threshold", 0.1),
-        high_cardinality_strategy=cfg.get("high_cardinality_strategy", "target"),
+def run(config: RunConfig) -> dict[str, Any]:
+    started = time.monotonic()
+    config.output_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+    except ImportError:
+        pass
+
+    bundle, raw_df = _load_input(config)
+    X_train, y_train = clean(bundle.X_train, bundle.y_train)
+    X_test, y_test = clean(bundle.X_test, bundle.y_test, verbose=False)
+
+    decisions = ResourceManager().analyze(X_train, bundle.problem_type)
+    cv = config.cv
+    if decisions["size_category"] == "large":
+        cv = min(cv, 2)
+
+    requested_models = config.models or decisions["models_to_run"]
+    models = get_models(
+        bundle.problem_type, requested_models, n_samples=len(X_train)
     )
-    resource_config = rm.analyze(X_train_clean, problem_type=bundle.problem_type)
+    if not models:
+        raise RuntimeError("No compatible models are available in this environment")
 
-    # Override pipeline settings based on resource constraints
-    do_fe = do_fe and resource_config["enable_fe"]
-    # Determine safe max limit based on dataset size
-    if resource_config["size_category"] == "small":
-        safe_max_level = "full"
-    elif resource_config["size_category"] == "medium":
-        safe_max_level = "medium"
-    else:
-        safe_max_level = "light"
-        if skip_cv_large:
-            print("[Pipeline] Large dataset detected and --skip_cv_large is active. Setting cv_folds=1 (No CV).")
-            cv_folds = 1
-        elif cv_folds > 2:
-            print(f"[Pipeline] Large dataset detected. Capping cv_folds to 2 (was {cv_folds}) to save time.")
-            cv_folds = 2
-
-    fe_level_map = {"off": 0, "light": 1, "medium": 2, "full": 3}
-    fe_level_rev = {0: "off", 1: "light", 2: "medium", 3: "full"}
-
-    if fe_level_arg != "auto":
-        resource_fe_level = fe_level_arg
-        # STRICT CAP: Never exceed the dataset's safe maximum level
-        if fe_level_map.get(resource_fe_level, 0) > fe_level_map[safe_max_level]:
-            print(f"[Pipeline] WARNING: Requested FE level '{resource_fe_level.upper()}' overrides safe limits. Feature engineering level capped at {safe_max_level.upper()} due to {resource_config['size_category']} dataset constraints.")
-            resource_fe_level = safe_max_level
-    else:
-        resource_fe_level = resource_config.get("fe_level", safe_max_level)
-
-    if interaction_k == 0:  # If user didn't explicitly set it, default to resource config
-        interaction_k = resource_config["interaction_k"]
-    else:
-        interaction_k = min(interaction_k, resource_config["interaction_k"])
-        
-    encoding_map = resource_config["encoding_strategies"]
-    
-    # Restrict models based on dataset size constraints
-    if "all" not in model_names:
-        model_names = [m for m in model_names if m in resource_config["models_to_run"]]
-        if not model_names:
-            model_names = resource_config["models_to_run"]
-    else:
-        model_names = resource_config["models_to_run"]
-
-    # 3. Base Feature processing (for Baseline Screening)
-    step += 1
-    print("\n" + "─" * 72)
-    print(f"  STEP {step} / {total_steps} — Baseline Feature processing")
-    print("─" * 72)
-    base_preprocessor, num_cols, cat_cols = build_preprocessor(
-        X_train_clean, scaler_map=None, encoding_map=encoding_map
+    encoding_map = decisions["encoding_strategies"]
+    baseline_preprocessor, _, _ = build_preprocessor(
+        X_train, encoding_map=encoding_map
     )
-
-    # 4. Baseline screening
-    step += 1
-    print("\n" + "─" * 72)
-    print(f"  STEP {step} / {total_steps} — Baseline screening")
-    print("─" * 72)
-    models = get_models(bundle.problem_type, model_names)
+    training_started = time.monotonic()
     promising, baseline_scores = baseline_screen(
-        models, base_preprocessor, X_train_clean, y_train_clean,
-        bundle.problem_type, sample_frac=sample_frac, cv=cv_folds,
-        random_state=random_state, max_time_seconds=max_time,
+        models,
+        baseline_preprocessor,
+        X_train,
+        y_train,
+        bundle.problem_type,
+        sample_frac=config.sample_fraction,
+        cv=cv,
+        random_state=config.random_state,
+        max_time_seconds=config.max_time_seconds,
     )
+    if bundle.problem_type == "classification":
+        from generalization import MODEL_FAMILIES
 
-    # 5. Adaptive Feature Engineering
-    fe_engine = None
+        # Preserve the strongest screened candidate from each structural
+        # family so diversity remains available for validation later.
+        for family_names in MODEL_FAMILIES.values():
+            family_candidates = [
+                name for name in family_names if name in baseline_scores
+            ]
+            if family_candidates:
+                family_best = max(
+                    family_candidates,
+                    key=lambda name: baseline_scores[name]["score"],
+                )
+                promising[family_best] = models[family_best]
+
     fe_log: list[str] = []
     scaler_map = None
-
-    if do_fe:
+    X_train_final, X_test_final = X_train, X_test
+    if config.feature_engineering:
         from feature_engineering import FeatureEngineer
-        from sklearn.feature_selection import mutual_info_classif, mutual_info_regression
 
-        step += 1
-        print("\n" + "─" * 72)
-        print(f"  STEP {step} / {total_steps} — Smart Feature Engineering")
-        print("─" * 72)
-
-        best_baseline_score = max(baseline_scores.values()) if baseline_scores else 0.0
-
-        # Performance-aware FE level adjustment
-        if fe_level_arg == "auto":
-            current_idx = fe_level_map.get(resource_fe_level, 1)
-            if best_baseline_score >= 0.85:
-                print(f"[Pipeline] Baseline performance ({best_baseline_score:.4f}) is strong. Downgrading FE to avoid overfitting and save time.")
-                new_idx = max(1, current_idx - 1)
-                resource_fe_level = fe_level_rev[new_idx]
-            elif best_baseline_score < 0.65:
-                print(f"[Pipeline] Baseline performance ({best_baseline_score:.4f}) is poor. Increasing FE level by one step to extract more signal.")
-                new_idx = current_idx + 1
-                max_idx = fe_level_map[safe_max_level]
-                if new_idx > max_idx:
-                    print(f"[Pipeline] Expansion prevented: Feature engineering level capped at {safe_max_level.upper()} due to {resource_config['size_category']} dataset constraints.")
-                    new_idx = max_idx
-                resource_fe_level = fe_level_rev[new_idx]
-
-        importances = None
-        if resource_fe_level != "light":
-            print("[Pipeline] Computing baseline feature importances for adaptive FE...")
-            numeric_cols = X_train_clean.select_dtypes(include="number").columns
-            if len(numeric_cols) > 0:
-                X_num = X_train_clean[numeric_cols].fillna(X_train_clean[numeric_cols].median())
-                if bundle.problem_type == "classification":
-                    mi = mutual_info_classif(X_num, y_train_clean, random_state=random_state)
-                else:
-                    mi = mutual_info_regression(X_num, y_train_clean, random_state=random_state)
-                importances = pd.Series(mi, index=numeric_cols)
-
-        fe_engine = FeatureEngineer(
-            fe_level=resource_fe_level,
-            cardinality_threshold=cardinality_thr,
-            skew_threshold=skew_thr,
-            outlier_strategy=outlier_strat,
-            encoding_strategy=encoding_strat,
-            interaction_features=interaction_k,
-            enable_ratios=enable_ratios,
-            feature_selection_threshold=feat_sel_threshold,
-            random_state=random_state,
-            encoding_map=encoding_map,
+        interaction_count = (
+            decisions["interaction_k"]
+            if config.interactions is None
+            else min(config.interactions, decisions["interaction_k"])
         )
-
-        X_train_final = fe_engine.fit_transform(
-            X_train_clean, y_train_clean, problem_type=bundle.problem_type, importances=importances
+        engineer = FeatureEngineer(
+            interaction_features=interaction_count,
+            enable_ratios=config.ratios,
+            outlier_strategy=config.outlier_strategy,
         )
-        X_test_final = fe_engine.transform(X_test_clean)
-        fe_log = fe_engine.log.copy()
-        scaler_map = fe_engine.get_scalers()
+        X_train_final = engineer.fit_transform(
+            X_train, y_train, problem_type=bundle.problem_type
+        )
+        X_test_final = engineer.transform(X_test)
+        scaler_map = engineer.get_scalers()
+        fe_log = engineer.log.copy()
 
-        if not fe_log:
-            print("[FE] No conditional transforms were applied.")
-    else:
-        # Step increment for alignment
-        step += 1
-        print("\n" + "─" * 72)
-        print(f"  STEP {step} / {total_steps} — Smart Feature Engineering (Skipped)")
-        print("─" * 72)
-        X_train_final = X_train_clean.copy()
-        X_test_final = X_test_clean.copy()
-
-    # 6. Final Feature processing (for Full Training)
-    step += 1
-    print("\n" + "─" * 72)
-    print(f"  STEP {step} / {total_steps} — Final Feature processing")
-    print("─" * 72)
-    final_preprocessor, _, _ = build_preprocessor(
+    preprocessor, _, _ = build_preprocessor(
         X_train_final, scaler_map=scaler_map, encoding_map=encoding_map
     )
-
-    feature_selector = None
-    if feat_select:
-        final_preprocessor.fit(X_train_final)
-        X_train_transformed = final_preprocessor.transform(X_train_final)
-        X_train_transformed, feature_selector = select_features(
-            X_train_transformed, y_train_clean, bundle.problem_type,
-            method=feat_select, k=feat_k,
-        )
-
-    # 7. Full training on promising models 
-    step += 1
-    print("\n" + "─" * 72)
-    print(f"  STEP {step} / {total_steps} — Full training")
-    print("─" * 72)
-    trained, full_scores = full_train(
-        promising, final_preprocessor, X_train_final, y_train_clean,
-        bundle.problem_type, cv=cv_folds, max_time_seconds=max_time,
+    trained, validation_scores = full_train(
+        promising,
+        preprocessor,
+        X_train_final,
+        y_train,
+        bundle.problem_type,
+        cv=cv,
+        max_time_seconds=config.max_time_seconds,
     )
-
     if not trained:
-        print("ERROR: No models were trained (possible time-budget issue).")
-        sys.exit(1)
+        raise RuntimeError(
+            "No model completed training; increase --max-time or choose fewer models"
+        )
 
-    # N+3. Evaluation & selection 
-    step += 1
-    print("\n" + "─" * 72)
-    print(f"  STEP {step} / {total_steps} — Evaluation & selection")
-    print("─" * 72)
-    results = evaluate_models(
-        trained, X_test_final, y_test_clean, bundle.problem_type,
-    )
-    _print_results(results, bundle.problem_type)
-
-    best_name = select_best(results, bundle.problem_type)
-    print(f"  ★ Best model: {best_name}")
-
-    # Optional: hyperparameter tuning 
-    if do_tune:
-        print("\n" + "─" * 72)
-        print("  BONUS — Hyperparameter tuning")
-        print("─" * 72)
+    results = evaluate_models(trained, X_test_final, y_test, bundle.problem_type)
+    if config.tune:
         tuned = tune_top_models(
-            trained, X_train_final, y_train_clean,
-            bundle.problem_type, results,
-            top_n=2, method=tune_method, n_iter=tune_iter, cv=cv_folds,
+            trained,
+            X_train_final,
+            y_train,
+            bundle.problem_type,
+            results,
+            top_n=min(2, len(trained)),
+            method=config.tune_method,
+            n_iter=config.tune_iterations,
+            cv=cv,
         )
-        tuned_results = evaluate_models(
-            tuned, X_test_final, y_test_clean, bundle.problem_type,
-        )
-        _print_results(tuned_results, bundle.problem_type)
-        best_name = select_best(tuned_results, bundle.problem_type)
-        print(f"  ★ Best model (after tuning): {best_name}")
         trained.update(tuned)
-        results = pd.concat([results, tuned_results]).drop_duplicates(
-            subset="model", keep="last",
-        ).reset_index(drop=True)
+        results = evaluate_models(
+            trained, X_test_final, y_test, bundle.problem_type
+        )
 
-    # Save outputs 
+    generalization = None
+    if bundle.problem_type == "classification":
+        from generalization import select_generalized_classifier
+
+        generalization = select_generalized_classifier(
+            trained,
+            validation_scores,
+            X_train_final,
+            y_train,
+            random_state=config.random_state,
+        )
+        trained[generalization.name] = generalization.model
+        validation_scores[generalization.name] = (
+            generalization.validation_accuracy
+        )
+        best_name = generalization.name
+        results = evaluate_models(
+            trained, X_test_final, y_test, bundle.problem_type
+        )
+        print(
+            f"[Generalization] Selected {best_name}; "
+            f"T={generalization.temperature:.3f}, "
+            f"NLL {generalization.nll_before:.4f} -> "
+            f"{generalization.nll_after:.4f}."
+        )
+    else:
+        best_name = max(
+            trained, key=lambda name: validation_scores.get(name, -np.inf)
+        )
+    training_seconds = time.monotonic() - training_started
     best_model = trained[best_name]
-    model_path = os.path.join(output_dir, "best_model.pkl")
-    save_model(best_model, model_path)
-
-    if save_csv:
-        metrics_path = os.path.join(output_dir, "metrics.csv")
-        save_metrics(results, metrics_path)
-
-    # Phase 2: EDA + Explainability + Report 
-    if do_report:
-        from eda import run_eda
-        from explainer import run_explanations
-        from report_generator import generate_report
-
-        step += 1
-        print("\n" + "─" * 72)
-        print(f"  STEP {step} / {total_steps} — Exploratory Data Analysis")
-        print("─" * 72)
-        eda_result = run_eda(
-            raw_df, target_col, bundle.problem_type,
-            output_dir=os.path.join(reports_dir, "eda"),
+    train_predictions = best_model.predict(X_train_final)
+    if bundle.problem_type == "classification":
+        training_metric_name = "training_accuracy"
+        validation_metric_name = "validation_accuracy"
+        testing_metric_name = "testing_accuracy"
+        training_metric = float(accuracy_score(y_train, train_predictions))
+        validation_metric = float(validation_scores.get(best_name, np.nan))
+        testing_metric = float(
+            results.loc[results["model"] == best_name, "accuracy"].iloc[0]
+        )
+    else:
+        training_metric_name = "training_r2"
+        validation_metric_name = "validation_score"
+        testing_metric_name = "testing_r2"
+        training_metric = float(r2_score(y_train, train_predictions))
+        validation_metric = float(validation_scores.get(best_name, np.nan))
+        testing_metric = float(
+            results.loc[results["model"] == best_name, "r2"].iloc[0]
         )
 
-        step += 1
-        print("\n" + "─" * 72)
-        print(f"  STEP {step} / {total_steps} — Explainability & Report")
-        print("─" * 72)
-        explanation_paths = run_explanations(
-            best_model, X_test_final, y_test_clean,
-            output_dir=os.path.join(reports_dir, "explanations"),
-            use_shap=not skip_shap,
+    save_model(trained[best_name], str(config.output_dir / "best_model.joblib"))
+    save_metrics(results, str(config.output_dir / "metrics.csv"))
+
+    plot_paths: list[str] = []
+    html_report_path: str | None = None
+    if config.report:
+        try:
+            from eda import run_eda
+            from explainer import run_explanations
+            from report_generator import generate_report
+
+            report_dir = config.output_dir / "report"
+            eda_result = run_eda(
+                raw_df,
+                bundle.target_name,
+                bundle.problem_type,
+                output_dir=str(report_dir / "eda"),
+            )
+            explanations = run_explanations(
+                trained[best_name],
+                X_test_final,
+                y_test,
+                output_dir=str(report_dir / "explanations"),
+                use_shap=config.shap,
+            )
+            html_report_path = generate_report(
+                summary=eda_result["summary"],
+                results=results,
+                best_name=best_name,
+                problem_type=bundle.problem_type,
+                eda_paths=eda_result,
+                explanation_paths=explanations,
+                fe_log=fe_log,
+                output_path=str(report_dir / "report.html"),
+            )
+            plot_paths = [
+                path
+                for path in [
+                    eda_result.get("target_dist_path"),
+                    eda_result.get("feature_dist_path"),
+                    eda_result.get("corr_heatmap_path"),
+                    *explanations.values(),
+                ]
+                if path
+            ]
+        except Exception as exc:
+            LOGGER.warning("Plot/HTML report generation failed: %s", exc)
+
+    elapsed = time.monotonic() - started
+    usage = _memory_usage()
+    summary = {
+        training_metric_name: round(training_metric, 6),
+        validation_metric_name: (
+            None if np.isnan(validation_metric) else round(validation_metric, 6)
+        ),
+        testing_metric_name: round(testing_metric, 6),
+        "training_seconds": round(training_seconds, 3),
+        "total_pipeline_seconds": round(elapsed, 3),
+        **{
+            key: None if value is None else round(value, 3)
+            for key, value in usage.items()
+        },
+    }
+    if generalization is not None:
+        summary["temperature"] = round(generalization.temperature, 6)
+        summary["calibration_nll_before"] = round(
+            generalization.nll_before, 6
+        )
+        summary["calibration_nll_after"] = round(
+            generalization.nll_after, 6
+        )
+        summary["ensemble_used"] = generalization.ensemble_used
+        summary["ensemble_members"] = generalization.members
+    report_dir = config.output_dir / "report"
+    markdown_path: str | None = None
+    if config.llm:
+        from llm_explainer import generate_comprehensive_report
+
+        metric_row = results.loc[results["model"] == best_name].iloc[0]
+        llm_context = {
+            "dataset": {
+                "path": str(config.dataset),
+                "modality": "vision" if config.dataset.is_dir() else "tabular",
+                "samples": len(raw_df),
+                "features": len(bundle.feature_names),
+                "problem_type": bundle.problem_type,
+            },
+            "model": {"name": best_name},
+            "performance": {
+                "training": training_metric,
+                "validation": (
+                    None if np.isnan(validation_metric) else validation_metric
+                ),
+                "testing": testing_metric,
+                "held_out_metrics": {
+                    key: (
+                        None
+                        if pd.isna(value)
+                        else value.item()
+                        if hasattr(value, "item")
+                        else value
+                    )
+                    for key, value in metric_row.to_dict().items()
+                },
+            },
+            "resources": summary,
+            "plots": plot_paths,
+        }
+        markdown_path = generate_comprehensive_report(
+            llm_context,
+            config.dataset.stem,
+            output_path=str(report_dir / "explanation.md"),
+            use_llm=True,
         )
 
-        report_path = generate_report(
-            summary=eda_result["summary"],
-            results=results,
-            best_name=best_name,
-            problem_type=bundle.problem_type,
-            eda_paths=eda_result,
-            explanation_paths=explanation_paths,
-            fe_log=fe_log,
-            output_path=os.path.join(reports_dir, "report.html"),
-        )
+    notebook_path: str | None = None
+    if config.notebook:
+        try:
+            from notebook_generator import generate_advanced_notebook
 
-    elapsed = time.time() - wall_start
-    print(f"\n✓ Pipeline complete in {elapsed:.1f}s.")
+            notebook_path = generate_advanced_notebook(
+                {
+                    "data_path": str(config.dataset),
+                    "modality": (
+                        "vision" if config.dataset.is_dir() else "tabular"
+                    ),
+                },
+                {
+                    "best_model": best_name,
+                    "summary": summary,
+                    "metrics_path": str(config.output_dir / "metrics.csv"),
+                    "model_path": str(config.output_dir / "best_model.joblib"),
+                    "plot_paths": plot_paths,
+                },
+                str(config.output_dir / "analysis.ipynb"),
+            )
+        except Exception as exc:
+            LOGGER.warning("Notebook generation failed: %s", exc)
+
+    elapsed = time.monotonic() - started
+    summary["total_pipeline_seconds"] = round(elapsed, 3)
+    manifest = _write_manifest(
+        config, bundle.problem_type, best_name, elapsed, summary
+    )
+    _display_results(results, bundle.problem_type)
+    print(f"\nBest model: {best_name}")
+    print("\nRun summary")
+    print(f"Training {training_metric_name.split('_', 1)[1]}:   {training_metric:.4f}")
+    validation_display = (
+        "N/A" if np.isnan(validation_metric) else f"{validation_metric:.4f}"
+    )
+    print(f"Validation {validation_metric_name.split('_', 1)[1]}: {validation_display}")
+    print(f"Testing {testing_metric_name.split('_', 1)[1]}:    {testing_metric:.4f}")
+    print(f"Total training time: {training_seconds:.1f}s")
+    print(
+        f"RAM usage: {_format_usage(usage['ram_current_mb'])} current, "
+        f"{_format_usage(usage['ram_peak_mb'])} peak"
+    )
+    print(
+        f"VRAM usage: {_format_usage(usage['vram_current_mb'])} current, "
+        f"{_format_usage(usage['vram_peak_mb'])} peak"
+    )
+    print(f"Artifacts: {config.output_dir}")
+    if html_report_path:
+        print(f"HTML report: {html_report_path}")
+    if markdown_path:
+        print(f"Markdown explanation: {markdown_path}")
+    if notebook_path:
+        print(f"Notebook: {notebook_path}")
+    print(f"Manifest: {manifest}")
+    print(f"Completed in {elapsed:.1f}s")
+    return {
+        "best_model": best_name,
+        "problem_type": bundle.problem_type,
+        "results": results,
+        "run_summary": summary,
+        "output_dir": config.output_dir,
+    }
 
 
-# Entry point
+def main(argv: list[str] | None = None) -> int:
+    _configure_stdio()
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format="%(levelname)s %(name)s: %(message)s",
+    )
+    try:
+        run(_config_from_args(args))
+    except (FileNotFoundError, ValueError) as exc:
+        parser.error(str(exc))
+    except KeyboardInterrupt:
+        LOGGER.warning("Interrupted")
+        return 130
+    except Exception:
+        LOGGER.exception("Pipeline failed")
+        return 1
+    return 0
+
 
 if __name__ == "__main__":
-    parser = build_parser()
-    args = parser.parse_args()
-    run_pipeline(args)
+    sys.exit(main())

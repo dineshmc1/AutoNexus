@@ -41,20 +41,20 @@ class ResourceManager:
         # 1. Dataset size classification and basic rules
         if n_rows < self.small_size_threshold:
             size_category = "small"
-            models_to_run = ["logistic", "rf", "gb", "lightgbm", "xgboost"] if problem_type == "classification" else ["linear", "rf", "gb", "lightgbm", "xgboost"]
+            models_to_run = ["logistic", "et_clf", "gb", "lgbm_clf", "xgb_clf"] if problem_type == "classification" else ["ridge", "rf_reg", "gb_reg", "lgbm_reg", "xgb_reg"]
             enable_fe = True
             fe_level = "full"
             interaction_k = 5
         elif n_rows <= self.medium_size_threshold:
             size_category = "medium"
-            models_to_run = ["logistic", "rf", "lightgbm", "xgboost"] if problem_type == "classification" else ["linear", "rf", "lightgbm", "xgboost"]
+            models_to_run = ["logistic", "et_clf", "lgbm_clf", "xgb_clf"] if problem_type == "classification" else ["ridge", "rf_reg", "lgbm_reg", "xgb_reg"]
             enable_fe = True
             fe_level = "medium"
             interaction_k = 2
         else:
             size_category = "large"
             # For large datasets, restrict to scalable models.
-            models_to_run = ["logistic", "lightgbm", "xgboost"] if problem_type == "classification" else ["linear", "lightgbm", "xgboost"]
+            models_to_run = ["logistic", "lgbm_clf", "xgb_clf"] if problem_type == "classification" else ["ridge", "lgbm_reg", "xgb_reg"]
             enable_fe = True  # Enable FE but restrict to safe level
             fe_level = "light"
             interaction_k = 0

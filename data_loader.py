@@ -31,9 +31,13 @@ class DataBundle:
 
 
 def detect_problem_type(y: pd.Series, threshold: int = 10) -> str:
-    # Decide whether the task is classification or regression.
+    """Infer classification for categorical targets and low-cardinality numerics."""
     n_unique = y.nunique()
-    if n_unique < threshold:
+    if (
+        not pd.api.types.is_numeric_dtype(y)
+        or pd.api.types.is_bool_dtype(y)
+        or n_unique <= threshold
+    ):
         return "classification"
     return "regression"
 
@@ -64,6 +68,8 @@ def load_dataset(
     random_state: int = 42,
     problem_type: Optional[str] = None,
 ) -> DataBundle:
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"Dataset not found: {path}")
     ext = os.path.splitext(path)[1].lower()
     if ext == ".csv":
         df = pd.read_csv(path)
@@ -78,6 +84,15 @@ def load_dataset(
         raise ValueError(
             f"Target column '{target_col}' not found. "
             f"Available columns: {list(df.columns)}"
+        )
+    if df.empty:
+        raise ValueError("Dataset is empty.")
+    if len(df) < 10:
+        raise ValueError("Dataset must contain at least 10 rows.")
+    if df[target_col].isna().any():
+        missing_targets = int(df[target_col].isna().sum())
+        raise ValueError(
+            f"Target column '{target_col}' contains {missing_targets} missing value(s)."
         )
 
     X = df.drop(columns=[target_col])
@@ -137,13 +152,18 @@ def load_dataset(
     if problem_type == "classification":
         from sklearn.preprocessing import LabelEncoder
         y = pd.Series(LabelEncoder().fit_transform(y), name=y.name, index=y.index)
+        class_counts = y.value_counts()
+        if len(class_counts) < 2:
+            raise ValueError("Classification target must contain at least two classes.")
 
     print(f"[DataLoader] Loaded {len(df)} rows, {X.shape[1]} features.")
     print(f"[DataLoader] Problem type: {problem_type}")
 
+    stratify = None
+    if problem_type == "classification" and y.value_counts().min() >= 2:
+        stratify = y
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=test_size, random_state=random_state,
-        stratify=y if problem_type == "classification" else None,
+        X, y, test_size=test_size, random_state=random_state, stratify=stratify,
     )
 
     return DataBundle(

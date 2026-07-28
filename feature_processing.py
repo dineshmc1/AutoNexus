@@ -14,6 +14,21 @@ from sklearn.preprocessing import OneHotEncoder, RobustScaler, StandardScaler
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import FunctionTransformer
 
+
+def hash_features(df):
+    """Convert categorical values to named tokens for FeatureHasher."""
+    from sklearn.feature_extraction import FeatureHasher
+
+    if isinstance(df, np.ndarray):
+        df = pd.DataFrame(df, columns=[str(i) for i in range(df.shape[1])])
+    str_df = df.astype(str).fillna("missing")
+    for column in str_df.columns:
+        str_df[column] = column + "=" + str_df[column]
+    return FeatureHasher(
+        n_features=2048, input_type="string"
+    ).transform(str_df.values)
+
+
 def detect_column_types(X: pd.DataFrame) -> Tuple[List[str], List[str]]:
     numeric_cols = X.select_dtypes(include=["number"]).columns.tolist()
     categorical_cols = X.select_dtypes(include=["object", "category", "bool"]).columns.tolist()
@@ -36,7 +51,9 @@ def build_preprocessor(
         # A safe heuristic: if there are > 50 numeric columns and 0 categorical, it's likely an embedding.
         if len(numeric_cols) >= 50: 
             print(f"[Features] Detected dense numeric embeddings ({len(numeric_cols)}D). Bypassing ColumnTransformer to preserve geometry.")
-            preprocessor = FunctionTransformer(lambda x: x)
+            # FunctionTransformer with func=None is a pickle-safe identity
+            # transform. A local lambda would prevent saving the final model.
+            preprocessor = FunctionTransformer(validate=False)
             return preprocessor, numeric_cols, categorical_cols
 
     transformers = []
@@ -65,12 +82,6 @@ def build_preprocessor(
             ]), onehot_cols))
             
         if hash_cols:
-            from sklearn.feature_extraction import FeatureHasher
-            def hash_features(df):
-                if isinstance(df, np.ndarray): df = pd.DataFrame(df, columns=[str(i) for i in range(df.shape[1])])
-                str_df = df.astype(str).fillna('missing')
-                for c in str_df.columns: str_df[c] = c + "=" + str_df[c]
-                return FeatureHasher(n_features=2048, input_type='string').transform(str_df.values)
             transformers.append(("cat_hash", FunctionTransformer(hash_features, validate=False), hash_cols))
 
     preprocessor = ColumnTransformer(transformers=transformers, remainder="drop", sparse_threshold=0)

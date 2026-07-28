@@ -34,11 +34,15 @@ from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
 from sklearn.naive_bayes import GaussianNB
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 from sklearn.neural_network import MLPClassifier, MLPRegressor
-from lightgbm import LGBMClassifier, LGBMRegressor
-from xgboost import XGBClassifier, XGBRegressor
-from sklearn.model_selection import cross_val_score
-from sklearn.pipeline import Pipeline
-from sklearn.compose import ColumnTransformer
+try:
+    from lightgbm import LGBMClassifier, LGBMRegressor
+except ImportError:
+    LGBMClassifier = LGBMRegressor = None
+
+try:
+    from xgboost import XGBClassifier, XGBRegressor
+except ImportError:
+    XGBClassifier = XGBRegressor = None
 
 
 # Model catalogue
@@ -56,9 +60,6 @@ CLASSIFICATION_MODELS = {
     "ada_clf":     AdaBoostClassifier(n_estimators=100, random_state=42),
     "bag_clf":     BaggingClassifier(n_estimators=20, n_jobs=-1, random_state=42),
     "gb":          HistGradientBoostingClassifier(random_state=42),
-    "lgbm_clf":    LGBMClassifier(n_estimators=100, random_state=42, verbose=-1),
-    "xgb_clf":     XGBClassifier(n_estimators=100, random_state=42,
-                                  eval_metric="logloss", verbosity=0),
 }  # 14 classification models
 
 REGRESSION_MODELS = {
@@ -75,9 +76,23 @@ REGRESSION_MODELS = {
     "ada_reg":     AdaBoostRegressor(n_estimators=100, random_state=42),
     "bag_reg":     BaggingRegressor(n_estimators=20, n_jobs=-1, random_state=42),
     "gb_reg":      HistGradientBoostingRegressor(random_state=42),
-    "lgbm_reg":    LGBMRegressor(n_estimators=100, random_state=42, verbose=-1),
-    "xgb_reg":     XGBRegressor(n_estimators=100, random_state=42, verbosity=0),
 }  # 15 regression models
+
+if LGBMClassifier is not None:
+    CLASSIFICATION_MODELS["lgbm_clf"] = LGBMClassifier(
+        n_estimators=100, random_state=42, verbose=-1
+    )
+    REGRESSION_MODELS["lgbm_reg"] = LGBMRegressor(
+        n_estimators=100, random_state=42, verbose=-1
+    )
+
+if XGBClassifier is not None:
+    CLASSIFICATION_MODELS["xgb_clf"] = XGBClassifier(
+        n_estimators=100, random_state=42, eval_metric="logloss", verbosity=0
+    )
+    REGRESSION_MODELS["xgb_reg"] = XGBRegressor(
+        n_estimators=100, random_state=42, verbosity=0
+    )
 
 
 def get_models(
@@ -121,6 +136,16 @@ def create_model(model_name: str, params: Optional[Dict[str, Any]] = None) -> An
     return model
 
 
+def _configure_estimator(name: str, estimator: Any, y: Any) -> Any:
+    """Apply target-dependent settings that cannot live in the static catalog."""
+    if name == "xgb_clf":
+        n_classes = len(np.unique(y))
+        estimator.set_params(
+            eval_metric="mlogloss" if n_classes > 2 else "logloss"
+        )
+    return estimator
+
+
 # Helper for training with custom CV and early stopping
 def _train_and_evaluate(
     name: str,
@@ -136,7 +161,7 @@ def _train_and_evaluate(
 ) -> Tuple[float, Optional[Pipeline]]:
     from sklearn.model_selection import StratifiedKFold, KFold, train_test_split
     from sklearn.base import clone
-    from sklearn.metrics import f1_score, mean_squared_error
+    from sklearn.metrics import accuracy_score, mean_squared_error
     from sklearn.pipeline import Pipeline
     import scipy.sparse
     
@@ -199,7 +224,7 @@ def _train_and_evaluate(
             le_fold = LabelEncoder()
             y_tr = le_fold.fit_transform(y_tr)
             
-        if name in ["lightgbm", "xgboost"]:
+        if name in ["lgbm_clf", "lgbm_reg", "xgb_clf", "xgb_reg"]:
             if is_classification:
                 # Filter eval_set to only contain classes present in y_tr
                 valid_mask = np.isin(y_va, le_fold.classes_)
@@ -212,16 +237,16 @@ def _train_and_evaluate(
                 fit_kwargs["eval_set"] = [(X_va_eval, y_va_eval)]
             else:
                 fit_kwargs["eval_set"] = [(X_va_prep, y_va)]
-            if name == "lightgbm":
+            if name in ["lgbm_clf", "lgbm_reg"]:
                 try:
                     from lightgbm import early_stopping, log_evaluation
                     fit_kwargs["callbacks"] = [early_stopping(stopping_rounds=10, verbose=True), log_evaluation(period=10)]
                 except ImportError:
                     pass
-            elif name == "xgboost":
+            elif name in ["xgb_clf", "xgb_reg"]:
                 fit_kwargs["verbose"] = 10
                 
-        est = clone(estimator)
+        est = _configure_estimator(name, clone(estimator), y_tr)
         start_fold = time.time()
         est.fit(X_tr_prep, y_tr, **fit_kwargs)
         fold_times.append(time.time() - start_fold)
@@ -229,7 +254,7 @@ def _train_and_evaluate(
         y_pred = est.predict(X_va_prep)
         if is_classification:
             y_pred = le_fold.inverse_transform(y_pred)
-            sc = f1_score(y_va, y_pred, average="weighted", zero_division=0)
+            sc = accuracy_score(y_va, y_pred)
         else:
             sc = -np.sqrt(mean_squared_error(y_va, y_pred))
         cv_scores.append(sc)
@@ -247,7 +272,7 @@ def _train_and_evaluate(
         print(f"  [Trainer] Refitting {name} on ALL data...")
         prep = clone(preprocessor)
         X_prep = prep.fit_transform(X, y)
-        est = clone(estimator)
+        est = _configure_estimator(name, clone(estimator), y)
         est.fit(X_prep, y)
         best_pipe = Pipeline([("preprocessor", prep), ("model", est)])
         
@@ -284,9 +309,14 @@ def baseline_screen(
             print(f"[Baseline] Time budget exhausted – skipping '{name}'.")
             break
 
-        mean_score, _, avg_fit_time = _train_and_evaluate(
-            name, estimator, preprocessor, X_sub, y_sub, problem_type, cv, start, max_time_seconds, refit_full=False
-        )
+        try:
+            mean_score, _, avg_fit_time = _train_and_evaluate(
+                name, estimator, preprocessor, X_sub, y_sub, problem_type,
+                cv, start, max_time_seconds, refit_full=False,
+            )
+        except Exception as exc:
+            print(f"  [Baseline] Skipping '{name}' after training failed: {exc}")
+            continue
         if mean_score > -float('inf'):
             scores[name] = {'score': mean_score, 'time': avg_fit_time}
             print(f"  {name:>12s}  baseline score = {mean_score:.4f}, time = {avg_fit_time:.3f}s")
@@ -337,12 +367,18 @@ def full_train(
             print(f"[FullTrain] Time budget exhausted – skipping '{name}'.")
             break
 
-        mean_score, pipe, _ = _train_and_evaluate(
-            name, estimator, preprocessor, X, y, problem_type, cv, start, max_time_seconds, refit_full=True
-        )
+        try:
+            mean_score, pipe, _ = _train_and_evaluate(
+                name, estimator, preprocessor, X, y, problem_type,
+                cv, start, max_time_seconds, refit_full=True,
+            )
+        except Exception as exc:
+            print(f"  [FullTrain] Skipping '{name}' after training failed: {exc}")
+            continue
         if pipe is not None and mean_score > -float('inf'):
             scores[name] = mean_score
             trained[name] = pipe
-            print(f"  {name:>12s}  training score = {mean_score:.4f}")
+            metric_name = "validation accuracy" if problem_type == "classification" else "validation score"
+            print(f"  {name:>12s}  {metric_name} = {mean_score:.4f}")
 
     return trained, scores
