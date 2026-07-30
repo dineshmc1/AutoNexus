@@ -13,6 +13,16 @@ def _offline_report(context: dict[str, Any], error: str | None = None) -> str:
     performance = context.get("performance", {})
     model = context.get("model", {})
     resources = context.get("resources", {})
+    image_input = context.get("image_input") or {}
+    backbone_note = (
+        "\n- Vision backbone: "
+        f"`{image_input.get('backbone_key')}` "
+        f"(`{image_input.get('backbone')}`)"
+        "\n- Representation: "
+        f"{image_input.get('selected_representation')}"
+        if image_input
+        else ""
+    )
     note = (
         f"\n> LLM generation was unavailable: {error}\n"
         if error else ""
@@ -30,17 +40,18 @@ def _offline_report(context: dict[str, Any], error: str | None = None) -> str:
 ## 2. Selected Model
 
 The pipeline selected **{model.get("name", "unknown")}** after baseline
-screening and cross-validation.
+screening and cross-validation.{backbone_note}
 
 ## 3. Performance
 
-- Training metric: {performance.get("training", "N/A")}
-- Validation metric: {performance.get("validation", "N/A")}
-- Testing metric: {performance.get("testing", "N/A")}
+- Fitted training metric (diagnostic): {performance.get("training", "N/A")}
+- Cross-validated metric (primary): {performance.get("validation", "N/A")}
+- Held-out testing metric: {performance.get("testing", "N/A")}
 
-The validation metric estimates generalization during model selection. The
-testing metric is the final held-out estimate and should be used for deployment
-decisions. A large training-to-validation gap can indicate overfitting.
+Cross-validation is the primary model-selection estimate. The testing metric
+is the final held-out estimate and should be used for deployment decisions.
+The fitted training metric is diagnostic only; a large fit-to-validation gap
+can indicate excessive model capacity.
 
 ## 4. Resources
 
@@ -71,13 +82,18 @@ def generate_comprehensive_report(
             import litellm
             from config import LLM_MODEL
 
+            if not LLM_MODEL:
+                raise RuntimeError(
+                    "LLM_MODEL is not configured; using the offline report."
+                )
             system_prompt = """You are an expert ML consultant. Produce a
 professional Markdown report with exactly five sections: Dataset, Model
 Selection, Performance, Explainability, and Deployment Recommendations. Use
 only values in the supplied JSON. Clearly distinguish training, validation,
-and testing metrics. Do not invent facts."""
+and testing metrics. Treat fitted training performance as diagnostic and
+cross-validation as the primary selection estimate. Do not invent facts."""
             response = litellm.completion(
-                model=os.getenv("LLM_MODEL", LLM_MODEL),
+                model=LLM_MODEL,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {
@@ -89,7 +105,7 @@ and testing metrics. Do not invent facts."""
                 max_tokens=2500,
             )
             report_md = response.choices[0].message.content.strip()
-            print(f"[LLM] Consultant report generated with {os.getenv('LLM_MODEL', LLM_MODEL)}.")
+            print(f"[LLM] Consultant report generated with {LLM_MODEL}.")
         except Exception as exc:
             failure = str(exc)
             print(f"[LLM] Unavailable; writing offline explanation: {failure}")

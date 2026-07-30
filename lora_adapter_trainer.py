@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import copy
+import json
 import os
+import random
 from pathlib import Path
 
+import numpy as np
 import torch
 from peft import (
     LoraConfig,
@@ -13,12 +16,21 @@ from peft import (
     get_peft_model_state_dict,
     set_peft_model_state_dict,
 )
-from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 
-from lora_config import LORA_REGISTRY
-from multimodal_extractor import MultiModalDataset, multimodal_collate
+from image_splitting import split_labeled_indices
+from multimodal_extractor import (
+    MultiModalDataset,
+    TrainImageAugmentation,
+    extract_vision_features,
+    multimodal_collate,
+)
+from vision_backbones import (
+    DEFAULT_BACKBONE_KEY,
+    VISION_BACKBONES,
+    lora_configuration,
+)
 
 
 def _discover_files(data_dir: str, modality: str) -> tuple[list[str], list[str]]:
@@ -56,15 +68,25 @@ def train_universal_lora(
     weight_decay: float | None = None,
     files: list[str] | None = None,
     labels: list[str] | None = None,
+    groups: list[str] | None = None,
+    random_state: int = 42,
+    model_id: str | None = None,
+    model_revision: str = "main",
 ):
     """Train an adapter and restore the checkpoint with lowest validation NLL."""
-    if modality not in LORA_REGISTRY:
-        raise ValueError(f"Unsupported LoRA modality: {modality}")
+    if modality != "vision":
+        raise ValueError("The production CLI currently supports vision LoRA only.")
     if files is None and not os.path.isdir(data_dir):
         raise ValueError(f"LoRA data directory not found: {data_dir}")
-    if domain not in LORA_REGISTRY[modality]:
-        domain = "general"
-    cfg = LORA_REGISTRY[modality][domain]
+    selected_model_id = (
+        model_id
+        or VISION_BACKBONES[DEFAULT_BACKBONE_KEY].model_id
+    )
+    cfg = lora_configuration(selected_model_id)
+    if cfg is None:
+        raise ValueError(
+            f"Backbone '{selected_model_id}' does not support transformer LoRA."
+        )
 
     if files is None or labels is None:
         files, labels = _discover_files(data_dir, modality)
@@ -74,15 +96,33 @@ def train_universal_lora(
         raise ValueError(
             "LoRA adaptation requires at least 20 files across two classes."
         )
+    if groups is not None and len(groups) != len(files):
+        raise ValueError("LoRA groups must align with image files.")
+
+    random.seed(random_state)
+    np.random.seed(random_state)
+    torch.manual_seed(random_state)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(random_state)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     processor = None
     tokenizer = None
     if modality == "vision":
-        from transformers import AutoModel, AutoProcessor
+        from transformers import AutoConfig, AutoModel, AutoProcessor
 
-        processor = AutoProcessor.from_pretrained(cfg["base_model"])
-        base_model = AutoModel.from_pretrained(cfg["base_model"]).to(device)
+        model_config = AutoConfig.from_pretrained(
+            cfg["base_model"], revision=model_revision
+        )
+        resolved_revision = (
+            getattr(model_config, "_commit_hash", None) or model_revision
+        )
+        processor = AutoProcessor.from_pretrained(
+            cfg["base_model"], revision=resolved_revision
+        )
+        base_model = AutoModel.from_pretrained(
+            cfg["base_model"], revision=resolved_revision
+        ).to(device)
     elif modality == "audio":
         from transformers import AutoFeatureExtractor, ASTModel
 
@@ -105,6 +145,19 @@ def train_universal_lora(
             task_type=cfg["task_type"],
         ),
     )
+    checkpointing_enabled = False
+    if device.type == "cuda":
+        total_vram_gb = (
+            torch.cuda.get_device_properties(device).total_memory
+            / (1024 ** 3)
+        )
+        if total_vram_gb <= 12 and hasattr(
+            peft_model, "gradient_checkpointing_enable"
+        ):
+            peft_model.gradient_checkpointing_enable()
+            if hasattr(peft_model, "enable_input_require_grads"):
+                peft_model.enable_input_require_grads()
+            checkpointing_enabled = True
     hidden_size = getattr(
         base_model.config,
         "projection_dim",
@@ -114,28 +167,44 @@ def train_universal_lora(
     label_to_id = {label: index for index, label in enumerate(class_names)}
     classifier = torch.nn.Linear(hidden_size, len(class_names)).to(device)
 
-    indices = list(range(len(files)))
-    try:
-        train_indices, val_indices = train_test_split(
-            indices,
-            test_size=validation_size,
-            random_state=42,
-            stratify=labels,
-        )
-    except ValueError:
-        train_indices, val_indices = train_test_split(
-            indices, test_size=validation_size, random_state=42
-        )
-    dataset = MultiModalDataset(files, labels, modality=modality)
+    train_indices, val_indices, split_method = split_labeled_indices(
+        labels,
+        test_size=validation_size,
+        random_state=random_state,
+        groups=groups,
+    )
+    directional_tokens = (
+        "left",
+        "right",
+        "clockwise",
+        "counterclockwise",
+    )
+    directional_labels = any(
+        token in str(label).lower()
+        for label in labels
+        for token in directional_tokens
+    )
+    flip_probability = 0.0 if directional_labels else 0.5
+    train_dataset = MultiModalDataset(
+        files,
+        labels,
+        modality=modality,
+        transform=TrainImageAugmentation(
+            horizontal_flip_probability=flip_probability
+        ),
+    )
+    validation_dataset = MultiModalDataset(
+        files, labels, modality=modality
+    )
     train_loader = DataLoader(
-        Subset(dataset, train_indices),
+        Subset(train_dataset, train_indices),
         batch_size=batch_size,
         shuffle=True,
         num_workers=0,
         collate_fn=multimodal_collate,
     )
     val_loader = DataLoader(
-        Subset(dataset, val_indices),
+        Subset(validation_dataset, val_indices),
         batch_size=batch_size,
         shuffle=False,
         num_workers=0,
@@ -167,24 +236,9 @@ def train_universal_lora(
 
     def extract_features(batch):
         if modality == "vision":
-            inputs = processor(images=batch, return_tensors="pt").to(device)
-            if hasattr(peft_model, "get_image_features"):
-                features = peft_model.get_image_features(**inputs)
-            elif (
-                hasattr(peft_model, "base_model")
-                and hasattr(peft_model.base_model.model, "get_image_features")
-            ):
-                features = peft_model.base_model.model.get_image_features(
-                    **inputs
-                )
-            else:
-                outputs = peft_model(**inputs)
-                if hasattr(outputs, "image_embeds"):
-                    features = outputs.image_embeds
-                elif hasattr(outputs, "pooler_output"):
-                    features = outputs.pooler_output
-                else:
-                    features = outputs.last_hidden_state[:, 0]
+            features = extract_vision_features(
+                peft_model, processor, batch, device
+            )
         elif modality == "audio":
             inputs = processor(
                 batch,
@@ -212,7 +266,10 @@ def train_universal_lora(
     stale_epochs = 0
     print(
         f"[LoRA] Training {len(train_indices)} / validating "
-        f"{len(val_indices)} samples; weight_decay={decay}."
+        f"{len(val_indices)} samples; weight_decay={decay}; "
+        f"gradient_checkpointing={checkpointing_enabled}; "
+        f"split={split_method}; augmentation=train-only "
+        f"(horizontal_flip_probability={flip_probability})."
     )
 
     for epoch in range(max_epochs):
@@ -300,6 +357,26 @@ def train_universal_lora(
     if tokenizer is not None:
         tokenizer.save_pretrained(output_path)
     torch.save(classifier.state_dict(), Path(output_path, "classifier.pt"))
+    metadata = {
+        "best_validation_nll": best_loss,
+        "epochs_completed": epoch + 1,
+        "early_stopping_patience": patience,
+        "weight_decay": decay,
+        "gradient_checkpointing": checkpointing_enabled,
+        "split_method": split_method,
+        "train_samples": len(train_indices),
+        "validation_samples": len(val_indices),
+        "train_only_augmentation": True,
+        "horizontal_flip_probability": flip_probability,
+        "directional_labels_detected": directional_labels,
+        "random_state": random_state,
+        "base_model": selected_model_id,
+        "base_model_revision": resolved_revision,
+        "target_modules": cfg["target_modules"],
+    }
+    Path(output_path, "training_metadata.json").write_text(
+        json.dumps(metadata, indent=2), encoding="utf-8"
+    )
     print(
         f"[LoRA] Adapter saved to {output_path}; "
         f"best validation loss={best_loss:.4f}."

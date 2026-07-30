@@ -1,7 +1,11 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "automated-ml-pipeline"
-version = "0.1.0"
-description = "A production-oriented CLI for automated tabular machine learning"
+version = "1.0.0"
+description = "Production CLI for automated tabular and image classification"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -15,51 +19,62 @@ dependencies = [
     "scikit-learn>=1.2",
     "scipy>=1.9",
     "seaborn>=0.12",
+    "xlrd>=2",
 ]
 
 [project.optional-dependencies]
 boosting = ["lightgbm>=4", "xgboost>=2"]
-reports = ["matplotlib>=3.6", "seaborn>=0.12", "shap>=0.42"]
+explain = ["shap>=0.42"]
 images = [
-    "librosa>=0.10",
-    "opencv-python>=4.8",
     "peft>=0.10",
     "pillow>=10",
-    "python-dotenv>=1",
     "torch>=2",
     "tqdm>=4.66",
     "transformers>=4.40",
 ]
-research = [
-    "faiss-cpu>=1.7",
-    "litellm",
-    "optuna",
-    "torch",
-    "transformers",
-    "wandb",
-]
+llm = ["litellm>=1", "python-dotenv>=1"]
+dev = ["pytest>=8"]
 all = [
-    "faiss-cpu>=1.7",
     "lightgbm>=4",
-    "litellm",
-    "librosa>=0.10",
-    "matplotlib>=3.6",
-    "opencv-python>=4.8",
-    "optuna",
+    "litellm>=1",
     "peft>=0.10",
     "pillow>=10",
     "python-dotenv>=1",
-    "seaborn>=0.12",
     "shap>=0.42",
-    "torch",
+    "torch>=2",
     "tqdm>=4.66",
-    "transformers",
-    "wandb",
+    "transformers>=4.40",
     "xgboost>=2",
 ]
 
 [project.scripts]
 ml-builder = "main:main"
+
+[tool.setuptools]
+py-modules = [
+    "config",
+    "data_cleaner",
+    "data_loader",
+    "dataset_embedding",
+    "eda",
+    "explainer",
+    "feature_engineering",
+    "feature_processing",
+    "generalization",
+    "backbone_selector",
+    "image_splitting",
+    "llm_explainer",
+    "lora_adapter_trainer",
+    "lora_config",
+    "main",
+    "model_selector",
+    "model_trainer",
+    "multimodal_extractor",
+    "notebook_generator",
+    "report_generator",
+    "resource_manager",
+    "vision_backbones",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

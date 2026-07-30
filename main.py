@@ -12,16 +12,17 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
+import shlex
 import sys
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
 from sklearn.metrics import accuracy_score, r2_score
-from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 
 from data_cleaner import clean
@@ -31,7 +32,6 @@ from model_selector import (
     evaluate_models,
     save_metrics,
     save_model,
-    select_best,
     tune_top_models,
 )
 from model_trainer import baseline_screen, full_train, get_models
@@ -57,6 +57,7 @@ class RunConfig:
     models: list[str]
     test_size: float
     sample_fraction: float
+    baseline_seconds: float
     cv: int
     max_time_seconds: float | None
     random_state: int
@@ -72,6 +73,8 @@ class RunConfig:
     llm: bool
     notebook: bool
     adapt_lora: bool
+    backbones: list[str]
+    backbone_time_seconds: float
 
 
 def _positive_int(value: str) -> int:
@@ -110,7 +113,7 @@ def _duration(value: str) -> float:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ml-builder",
-        description="Train and evaluate tabular ML models from one command.",
+        description="Train and evaluate tabular or image ML from one command.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
@@ -136,7 +139,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Comma-separated model keys; omit to use resource-aware defaults",
     )
     parser.add_argument("--test-size", type=_fraction, default=0.2)
-    parser.add_argument("--sample", type=_fraction, default=0.3)
+    parser.add_argument(
+        "--sample", type=_fraction, default=0.1,
+        help="Data fraction used by the cheap landmark/baseline stage",
+    )
+    parser.add_argument(
+        "--baseline-time",
+        type=_duration,
+        default=15.0,
+        help="Separate wall-clock budget for shortlist screening",
+    )
     parser.add_argument("--cv", type=_positive_int, default=5)
     parser.add_argument(
         "--max-time", type=_duration,
@@ -186,7 +198,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--adapt-lora",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Fine-tune LoRA for image data with explicit train/test folders",
+        help="Fine-tune LoRA on image development data with early stopping",
+    )
+    parser.add_argument(
+        "--backbones",
+        default="auto",
+        help=(
+            "Comma-separated vision backbone keys (clip,dinov2,resnet,siglip) "
+            "or auto"
+        ),
+    )
+    parser.add_argument(
+        "--backbone-time",
+        type=_duration,
+        default=900.0,
+        help="Cooperative time budget for automatic backbone search",
     )
     parser.add_argument(
         "--log-level", choices=("DEBUG", "INFO", "WARNING", "ERROR"),
@@ -199,16 +225,54 @@ def _config_from_args(args: argparse.Namespace) -> RunConfig:
     dataset = args.dataset
     if dataset is None:
         try:
-            entered_path = input("Dataset path (CSV, Excel, or image folder): ").strip()
+            entered_path = input(
+                "Dataset path (CSV, Excel, or image folder): "
+            ).strip()
         except EOFError as exc:
             raise ValueError(
                 "Dataset path is required when input is non-interactive."
             ) from exc
         if not entered_path:
             raise ValueError("Dataset path cannot be empty.")
-        dataset = Path(entered_path.strip('"').strip("'"))
+
+        # Accept convenient input such as:
+        # C:\datasets\images --adapt-lora --no-shap
+        option_match = re.search(
+            r"\s+(--[a-z][a-z0-9-]*)", entered_path, flags=re.IGNORECASE
+        )
+        if option_match:
+            path_text = entered_path[: option_match.start()].strip()
+            option_text = entered_path[option_match.start() :].strip()
+            prompt_options = [
+                token.strip('"').strip("'")
+                for token in shlex.split(option_text, posix=False)
+            ]
+            prompt_parser = build_parser()
+            parsed_prompt = prompt_parser.parse_args(
+                [path_text.strip('"').strip("'"), *prompt_options]
+            )
+            for token in prompt_options:
+                if not token.startswith("--"):
+                    continue
+                option_name = token.split("=", 1)[0]
+                action = prompt_parser._option_string_actions.get(option_name)
+                if action is not None:
+                    setattr(args, action.dest, getattr(parsed_prompt, action.dest))
+            dataset = parsed_prompt.dataset
+        else:
+            dataset = Path(entered_path.strip('"').strip("'"))
 
     dataset = dataset.expanduser().resolve()
+    if (
+        dataset.is_dir()
+        and dataset.name.lower() == "train"
+        and (dataset.parent / "test").is_dir()
+    ):
+        print(
+            f"[Input] Detected sibling train/test folders; using dataset "
+            f"root: {dataset.parent}"
+        )
+        dataset = dataset.parent
     target = args.target
     if dataset.is_file() and target is None:
         try:
@@ -225,6 +289,14 @@ def _config_from_args(args: argparse.Namespace) -> RunConfig:
         models = [name.strip() for name in args.models.split(",") if name.strip()]
     if args.interactions is not None and args.interactions < 0:
         raise ValueError("--interactions cannot be negative")
+    backbones = [
+        name.strip().lower()
+        for name in args.backbones.split(",")
+        if name.strip()
+    ]
+    from vision_backbones import resolve_backbones
+
+    resolve_backbones(backbones)
     return RunConfig(
         dataset=dataset,
         target=target,
@@ -233,6 +305,7 @@ def _config_from_args(args: argparse.Namespace) -> RunConfig:
         models=models,
         test_size=args.test_size,
         sample_fraction=args.sample,
+        baseline_seconds=args.baseline_time,
         cv=args.cv,
         max_time_seconds=args.max_time,
         random_state=args.seed,
@@ -248,6 +321,8 @@ def _config_from_args(args: argparse.Namespace) -> RunConfig:
         llm=args.llm,
         notebook=args.notebook,
         adapt_lora=args.adapt_lora,
+        backbones=backbones,
+        backbone_time_seconds=args.backbone_time,
     )
 
 
@@ -320,8 +395,44 @@ def _format_usage(value: float | None) -> str:
     return "N/A" if value is None else f"{value:.1f} MiB"
 
 
+def _oob_score(model: Any) -> float | None:
+    """Extract an out-of-bag score through calibration/pipeline wrappers."""
+    candidate = getattr(model, "estimator", model)
+    named_steps = getattr(candidate, "named_steps", None)
+    if named_steps is not None:
+        candidate = named_steps.get("model", candidate)
+    value = getattr(candidate, "oob_score_", None)
+    return None if value is None else float(value)
+
+
+def _probe_image_representation(
+    X_fit: pd.DataFrame,
+    y_fit: pd.Series,
+    X_gate: pd.DataFrame,
+    y_gate: pd.Series,
+) -> dict[str, float]:
+    """Score one frozen/adapted representation on a LoRA-unseen gate."""
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.metrics import accuracy_score, log_loss
+
+    probe = LogisticRegression(
+        C=1.0,
+        max_iter=3000,
+        class_weight="balanced",
+        random_state=42,
+    )
+    probe.fit(X_fit, y_fit)
+    predictions = probe.predict(X_gate)
+    probabilities = probe.predict_proba(X_gate)
+    return {
+        "accuracy": float(accuracy_score(y_gate, predictions)),
+        "nll": float(log_loss(y_gate, probabilities, labels=probe.classes_)),
+    }
+
+
 def _load_image_dataset(config: RunConfig) -> tuple[DataBundle, pd.DataFrame]:
-    """Embed a class-folder image dataset and return a standard data bundle."""
+    """Build a leakage-safe image representation and standard data bundle."""
+    image_started = time.monotonic()
     image_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
     image_count = sum(
         1
@@ -340,6 +451,10 @@ def _load_image_dataset(config: RunConfig) -> tuple[DataBundle, pd.DataFrame]:
             UniversalEmbedder,
             discover_labeled_files,
         )
+        from image_splitting import (
+            infer_image_groups,
+            split_labeled_indices,
+        )
     except ImportError as exc:
         raise RuntimeError(
             "Image training dependencies are missing. Run: uv sync --extra images"
@@ -351,6 +466,10 @@ def _load_image_dataset(config: RunConfig) -> tuple[DataBundle, pd.DataFrame]:
     val_dir = config.dataset / "val"
     test_dir = config.dataset / "test"
     explicit_split = train_dir.is_dir() and test_dir.is_dir()
+    split_method = "explicit-folders"
+    development_groups: list[str] | None = None
+    selected_development_groups: list[str] | None = None
+    grouping_method = "explicit-folders"
     if explicit_split:
         train_files, train_labels = discover_labeled_files(
             str(train_dir), "vision"
@@ -365,10 +484,15 @@ def _load_image_dataset(config: RunConfig) -> tuple[DataBundle, pd.DataFrame]:
         )
         development_files = train_files + val_files
         development_labels = train_labels + val_labels
-        lora_files, lora_labels = train_files, train_labels
+        development_groups, grouping_method = infer_image_groups(
+            development_files,
+            development_labels,
+            config.dataset,
+        )
         print(
             f"[Split] Using folders: {len(development_files)} development, "
-            f"{len(test_files)} test images."
+            f"{len(test_files)} test images; development CV grouping: "
+            f"{grouping_method}."
         )
     else:
         all_files, all_labels = discover_labeled_files(
@@ -378,13 +502,15 @@ def _load_image_dataset(config: RunConfig) -> tuple[DataBundle, pd.DataFrame]:
             raise ValueError(
                 "Image classification requires at least two class folders."
             )
-        indices = np.arange(len(all_files))
         try:
-            development_idx, test_idx = train_test_split(
-                indices,
+            all_groups, grouping_method = infer_image_groups(
+                all_files, all_labels, config.dataset
+            )
+            development_idx, test_idx, split_method = split_labeled_indices(
+                all_labels,
                 test_size=config.test_size,
                 random_state=config.random_state,
-                stratify=all_labels,
+                groups=all_groups,
             )
         except ValueError as exc:
             raise ValueError(
@@ -397,45 +523,352 @@ def _load_image_dataset(config: RunConfig) -> tuple[DataBundle, pd.DataFrame]:
         ]
         test_files = [all_files[index] for index in test_idx]
         test_labels = [all_labels[index] for index in test_idx]
-        lora_files, lora_labels = development_files, development_labels
+        development_groups = (
+            [all_groups[index] for index in development_idx]
+            if all_groups is not None
+            else None
+        )
         print(
-            f"[Split] Automatically reserved {len(test_files)} untouched "
-            f"test images; {len(development_files)} development images."
+            f"[Split] {split_method} reserved {len(test_files)} untouched "
+            f"test images; {len(development_files)} development images "
+            f"(group inference: {grouping_method})."
         )
 
-    adapter_path = None
-    if config.adapt_lora:
-        from lora_adapter_trainer import train_universal_lora
+    cache_dir = config.output_dir / ".cache" / "embeddings"
+    from backbone_selector import select_vision_backbone
 
-        adapter_path = config.output_dir / "lora_adapter"
-        train_universal_lora(
-            modality="vision",
-            domain="general",
-            data_dir=str(config.dataset),
-            output_path=str(adapter_path),
-            files=lora_files,
-            labels=lora_labels,
-        )
-
-    embedder = UniversalEmbedder(
-        device=device,
-        batch_size=32,
-        domain="general",
-        modality="vision",
-        adapter_path=str(adapter_path) if adapter_path else None,
-    )
-    X, labels = embedder.embed_files(
+    embedding_started = time.monotonic()
+    backbone_selection = select_vision_backbone(
         development_files,
         development_labels,
-        "vision",
-        cache_key=f"{config.dataset}:development:{config.random_state}",
+        development_groups,
+        requested=config.backbones,
+        device=device,
+        cache_dir=str(cache_dir),
+        time_budget_seconds=config.backbone_time_seconds,
+        random_state=config.random_state,
     )
-    X_test, test_labels = embedder.embed_files(
-        test_files,
-        test_labels,
-        "vision",
-        cache_key=f"{config.dataset}:test:{config.random_state}",
+    selected_backbone = backbone_selection.spec
+    selected_backbone_revision = backbone_selection.metrics["selected"][
+        "resolved_revision"
+    ]
+    frozen_development_X = backbone_selection.embeddings
+    frozen_development_labels = backbone_selection.labels.astype(str)
+    image_metadata: dict[str, Any] = {
+        "backbone": selected_backbone.model_id,
+        "backbone_key": selected_backbone.key,
+        "backbone_family": selected_backbone.family,
+        "backbone_revision": selected_backbone_revision,
+        "backbone_search": backbone_selection.metrics,
+        "split_method": split_method,
+        "grouping_method": grouping_method,
+        "development_images": len(development_files),
+        "test_images": len(test_files),
+        "lora_requested": config.adapt_lora,
+    }
+
+    def frozen_fallback_after_lora_failure(
+        exc: Exception,
+        failure_started: float,
+    ) -> tuple[DataBundle, pd.DataFrame]:
+        failure = f"{type(exc).__name__}: {exc}"
+        LOGGER.warning(
+            "LoRA path failed; retrying with the selected frozen backbone: %s",
+            failure,
+        )
+        failed_seconds = time.monotonic() - failure_started
+        fallback_bundle, fallback_raw = _load_image_dataset(
+            replace(config, adapt_lora=False)
+        )
+        fallback_bundle.metadata["lora_requested"] = True
+        fallback_bundle.metadata["lora_gate"] = {
+            "adapter_selected": False,
+            "status": "failed-frozen-fallback",
+            "error": failure,
+        }
+        fallback_bundle.metadata["failed_lora_seconds"] = round(
+            failed_seconds, 3
+        )
+        fallback_bundle.metadata["total_image_input_seconds"] = round(
+            fallback_bundle.metadata.get("total_image_input_seconds", 0.0)
+            + failed_seconds,
+            3,
+        )
+        return fallback_bundle, fallback_raw
+
+    if config.adapt_lora and selected_backbone.supports_lora:
+        from lora_adapter_trainer import train_universal_lora
+
+        if explicit_split and val_files:
+            probe_files = train_files
+            probe_labels = train_labels
+            gate_files = val_files
+            gate_labels = val_labels
+            if development_groups is not None:
+                probe_groups = development_groups[: len(train_files)]
+                gate_groups = development_groups[len(train_files) :]
+                probe_grouping = grouping_method
+            else:
+                probe_groups, probe_grouping = infer_image_groups(
+                    probe_files, probe_labels, train_dir
+                )
+                gate_groups = None
+            gate_split_method = "explicit-val-folder"
+        else:
+            probe_groups_all, probe_grouping = infer_image_groups(
+                development_files,
+                development_labels,
+                train_dir if explicit_split else config.dataset,
+            )
+            if development_groups is not None:
+                probe_groups_all = development_groups
+            probe_idx, gate_idx, gate_split_method = split_labeled_indices(
+                development_labels,
+                test_size=0.15,
+                random_state=config.random_state + 1,
+                groups=probe_groups_all,
+            )
+            probe_files = [
+                development_files[index] for index in probe_idx
+            ]
+            probe_labels = [
+                development_labels[index] for index in probe_idx
+            ]
+            gate_files = [development_files[index] for index in gate_idx]
+            gate_labels = [
+                development_labels[index] for index in gate_idx
+            ]
+            probe_groups = (
+                [probe_groups_all[index] for index in probe_idx]
+                if probe_groups_all is not None
+                else None
+            )
+            gate_groups = (
+                [probe_groups_all[index] for index in gate_idx]
+                if probe_groups_all is not None
+                else None
+            )
+
+        if probe_groups is not None and gate_groups is not None:
+            selected_development_groups = probe_groups + gate_groups
+
+        adapter_path = (
+            config.output_dir / "lora_adapter" / selected_backbone.key
+        )
+        lora_started = time.monotonic()
+        try:
+            train_universal_lora(
+                modality="vision",
+                domain="general",
+                data_dir=str(config.dataset),
+                output_path=str(adapter_path),
+                files=probe_files,
+                labels=probe_labels,
+                groups=probe_groups,
+                random_state=config.random_state,
+                model_id=selected_backbone.model_id,
+                model_revision=selected_backbone_revision,
+            )
+        except Exception as exc:
+            return frozen_fallback_after_lora_failure(exc, lora_started)
+        image_metadata["lora_training_seconds"] = round(
+            time.monotonic() - lora_started, 3
+        )
+
+        development_positions = {
+            filename: index
+            for index, filename in enumerate(development_files)
+        }
+        frozen_fit = frozen_development_X.iloc[
+            [development_positions[filename] for filename in probe_files]
+        ].reset_index(drop=True)
+        frozen_fit_labels = pd.Series(probe_labels, name="label")
+        frozen_gate = frozen_development_X.iloc[
+            [development_positions[filename] for filename in gate_files]
+        ].reset_index(drop=True)
+        frozen_gate_labels = pd.Series(gate_labels, name="label")
+        frozen_scores = _probe_image_representation(
+            frozen_fit,
+            frozen_fit_labels.astype(str),
+            frozen_gate,
+            frozen_gate_labels.astype(str),
+        )
+        adapted_embedder = UniversalEmbedder(
+            device=device,
+            batch_size=selected_backbone.batch_size,
+            domain="general",
+            modality="vision",
+            adapter_path=str(adapter_path),
+            cache_dir=str(cache_dir),
+            model_id=selected_backbone.model_id,
+            model_revision=selected_backbone_revision,
+        )
+        try:
+            adapted_fit, adapted_fit_labels = adapted_embedder.embed_files(
+                probe_files,
+                probe_labels,
+                cache_key=f"{config.dataset}:lora-probe-fit:adapted",
+            )
+            adapted_gate, adapted_gate_labels = adapted_embedder.embed_files(
+                gate_files,
+                gate_labels,
+                cache_key=f"{config.dataset}:lora-gate:adapted",
+            )
+            adapted_scores = _probe_image_representation(
+                adapted_fit,
+                adapted_fit_labels.astype(str),
+                adapted_gate,
+                adapted_gate_labels.astype(str),
+            )
+        except Exception as exc:
+            adapted_embedder.release()
+            return frozen_fallback_after_lora_failure(exc, lora_started)
+        accuracy_gain = (
+            adapted_scores["accuracy"] - frozen_scores["accuracy"]
+        )
+        nll_gain = frozen_scores["nll"] - adapted_scores["nll"]
+        adapter_selected = (
+            accuracy_gain >= 0.002
+            and adapted_scores["nll"] <= frozen_scores["nll"] + 0.01
+        ) or (accuracy_gain >= 0.0 and nll_gain >= 0.01)
+
+        image_metadata["lora_gate"] = {
+            "split_method": gate_split_method,
+            "grouping_method": probe_grouping,
+            "probe_images": len(probe_files),
+            "gate_images": len(gate_files),
+            "frozen": {
+                key: round(value, 6)
+                for key, value in frozen_scores.items()
+            },
+            "adapted": {
+                key: round(value, 6)
+                for key, value in adapted_scores.items()
+            },
+            "accuracy_gain": round(accuracy_gain, 6),
+            "nll_improvement": round(nll_gain, 6),
+            "adapter_selected": adapter_selected,
+        }
+        selected_name = (
+            f"adapted-{selected_backbone.key}"
+            if adapter_selected
+            else f"frozen-{selected_backbone.key}"
+        )
+        print(
+            f"[LoRA Gate] frozen accuracy={frozen_scores['accuracy']:.4f}, "
+            f"adapted accuracy={adapted_scores['accuracy']:.4f}; "
+            f"frozen NLL={frozen_scores['nll']:.4f}, "
+            f"adapted NLL={adapted_scores['nll']:.4f}. "
+            f"Selected {selected_name}."
+        )
+
+        if adapter_selected:
+            X = pd.concat(
+                [adapted_fit, adapted_gate], ignore_index=True
+            )
+            labels = pd.concat(
+                [adapted_fit_labels, adapted_gate_labels], ignore_index=True
+            )
+            selected_embedder = adapted_embedder
+        else:
+            adapted_embedder.release()
+            X = pd.concat(
+                [frozen_fit, frozen_gate], ignore_index=True
+            )
+            labels = pd.concat(
+                [frozen_fit_labels, frozen_gate_labels], ignore_index=True
+            )
+            selected_embedder = UniversalEmbedder(
+                device=device,
+                batch_size=selected_backbone.batch_size,
+                domain="general",
+                modality="vision",
+                adapter_path=None,
+                cache_dir=str(cache_dir),
+                model_id=selected_backbone.model_id,
+                model_revision=selected_backbone_revision,
+            )
+        image_metadata["selected_representation"] = selected_name
+        try:
+            X_test, test_labels = selected_embedder.embed_files(
+                test_files,
+                test_labels,
+                cache_key=(
+                    f"{config.dataset}:test:{selected_name}:"
+                    f"{config.random_state}"
+                ),
+            )
+        except Exception as exc:
+            selected_embedder.release()
+            if adapter_selected:
+                return frozen_fallback_after_lora_failure(
+                    exc, lora_started
+                )
+            raise
+        selected_embedder.release()
+    else:
+        if config.adapt_lora and not selected_backbone.supports_lora:
+            image_metadata["lora_gate"] = {
+                "adapter_selected": False,
+                "status": "skipped-unsupported-backbone",
+                "reason": (
+                    f"{selected_backbone.key} uses adaptation strategy "
+                    f"'{selected_backbone.adaptation}', not transformer LoRA"
+                ),
+            }
+            print(
+                f"[LoRA] Selected backbone {selected_backbone.key} does not "
+                "support q/v LoRA; keeping its frozen representation."
+            )
+        embedder = UniversalEmbedder(
+            device=device,
+            batch_size=selected_backbone.batch_size,
+            domain="general",
+            modality="vision",
+            adapter_path=None,
+            cache_dir=str(cache_dir),
+            model_id=selected_backbone.model_id,
+            model_revision=selected_backbone_revision,
+        )
+        X = frozen_development_X
+        labels = frozen_development_labels
+        X_test, test_labels = embedder.embed_files(
+            test_files,
+            test_labels,
+            cache_key=(
+                f"{config.dataset}:test:frozen-{selected_backbone.key}:"
+                f"{config.random_state}"
+            ),
+        )
+        embedder.release()
+        image_metadata["selected_representation"] = (
+            f"frozen-{selected_backbone.key}"
+        )
+        selected_development_groups = development_groups
+
+    image_metadata["embedding_and_gate_seconds"] = round(
+        time.monotonic() - embedding_started
+        - image_metadata.get("lora_training_seconds", 0.0),
+        3,
     )
+    image_metadata["total_image_input_seconds"] = round(
+        time.monotonic() - image_started, 3
+    )
+    groups_train: pd.Series | None = None
+    if (
+        selected_development_groups is not None
+        and len(selected_development_groups) == len(X)
+    ):
+        groups_train = pd.Series(
+            selected_development_groups, name="image_group"
+        )
+        image_metadata["downstream_cv_grouping"] = "stratified-group"
+    elif selected_development_groups is not None:
+        image_metadata["downstream_cv_grouping"] = (
+            "stratified-fallback-after-invalid-image-drop"
+        )
+    else:
+        image_metadata["downstream_cv_grouping"] = "stratified"
     labels = pd.Series(labels, name="label").astype(str)
     test_labels = pd.Series(test_labels, name="label").astype(str)
     class_counts = labels.value_counts()
@@ -462,6 +895,8 @@ def _load_image_dataset(config: RunConfig) -> tuple[DataBundle, pd.DataFrame]:
         problem_type="classification",
         feature_names=list(X.columns),
         target_name="label",
+        metadata=image_metadata,
+        groups_train=groups_train,
     )
     raw_df = pd.concat([X, X_test], ignore_index=True)
     raw_df["label"] = pd.concat(
@@ -507,8 +942,24 @@ def run(config: RunConfig) -> dict[str, Any]:
         pass
 
     bundle, raw_df = _load_input(config)
-    X_train, y_train = clean(bundle.X_train, bundle.y_train)
-    X_test, y_test = clean(bundle.X_test, bundle.y_test, verbose=False)
+    input_seconds = time.monotonic() - started
+    if config.dataset.is_dir():
+        # Image embeddings are finite numeric vectors. Keeping rows intact
+        # preserves the alignment of optional video/subject CV groups.
+        X_train = bundle.X_train.copy()
+        y_train = bundle.y_train.copy()
+        X_test = bundle.X_test.copy()
+        y_test = bundle.y_test.copy()
+    else:
+        X_train, y_train = clean(bundle.X_train, bundle.y_train)
+        X_test, y_test = clean(
+            bundle.X_test, bundle.y_test, verbose=False
+        )
+    training_groups = (
+        None
+        if bundle.groups_train is None
+        else bundle.groups_train.to_numpy()
+    )
 
     decisions = ResourceManager().analyze(X_train, bundle.problem_type)
     cv = config.cv
@@ -527,6 +978,9 @@ def run(config: RunConfig) -> dict[str, Any]:
         X_train, encoding_map=encoding_map
     )
     training_started = time.monotonic()
+    baseline_budget = config.baseline_seconds
+    if config.max_time_seconds is not None:
+        baseline_budget = min(baseline_budget, config.max_time_seconds)
     promising, baseline_scores = baseline_screen(
         models,
         baseline_preprocessor,
@@ -534,9 +988,33 @@ def run(config: RunConfig) -> dict[str, Any]:
         y_train,
         bundle.problem_type,
         sample_frac=config.sample_fraction,
-        cv=cv,
+        cv=min(cv, 2),
         random_state=config.random_state,
-        max_time_seconds=config.max_time_seconds,
+        max_time_seconds=baseline_budget,
+        preprocessing_cache_dir=str(
+            config.output_dir / ".cache" / "preprocessing"
+        ),
+        groups=training_groups,
+    )
+    from dataset_embedding import (
+        SEARCH_EMBEDDING_VERSION,
+        compute_search_embedding,
+    )
+
+    search_embedding = compute_search_embedding(
+        X_train, y_train, baseline_scores
+    )
+    search_profile = {
+        "version": SEARCH_EMBEDDING_VERSION,
+        "sample_fraction": config.sample_fraction,
+        "cv_folds": min(cv, 2),
+        "budget_seconds": baseline_budget,
+        "models_screened": list(baseline_scores),
+        "baseline_scores": baseline_scores,
+        "embedding": search_embedding.tolist(),
+    }
+    (config.output_dir / "search_profile.json").write_text(
+        json.dumps(search_profile, indent=2), encoding="utf-8"
     )
     if bundle.problem_type == "classification":
         from generalization import MODEL_FAMILIES
@@ -588,31 +1066,36 @@ def run(config: RunConfig) -> dict[str, Any]:
         bundle.problem_type,
         cv=cv,
         max_time_seconds=config.max_time_seconds,
+        preprocessing_cache_dir=str(
+            config.output_dir / ".cache" / "preprocessing"
+        ),
+        groups=training_groups,
+        random_state=config.random_state,
     )
     if not trained:
         raise RuntimeError(
             "No model completed training; increase --max-time or choose fewer models"
         )
 
-    results = evaluate_models(trained, X_test_final, y_test, bundle.problem_type)
     if config.tune:
-        tuned = tune_top_models(
+        tuned, tuned_scores = tune_top_models(
             trained,
             X_train_final,
             y_train,
             bundle.problem_type,
-            results,
+            validation_scores,
             top_n=min(2, len(trained)),
             method=config.tune_method,
             n_iter=config.tune_iterations,
             cv=cv,
+            groups=training_groups,
         )
         trained.update(tuned)
-        results = evaluate_models(
-            trained, X_test_final, y_test, bundle.problem_type
-        )
+        validation_scores.update(tuned_scores)
 
     generalization = None
+    generalization_gate_metric: float | None = None
+    primary_cv_scope = "selected-model"
     if bundle.problem_type == "classification":
         from generalization import select_generalized_classifier
 
@@ -622,25 +1105,39 @@ def run(config: RunConfig) -> dict[str, Any]:
             X_train_final,
             y_train,
             random_state=config.random_state,
+            groups=training_groups,
         )
         trained[generalization.name] = generalization.model
         validation_scores[generalization.name] = (
-            generalization.validation_accuracy
+            generalization.primary_cv_accuracy
         )
+        generalization_gate_metric = generalization.gate_accuracy
+        if generalization.ensemble_used:
+            primary_cv_scope = "best-ensemble-member-reference"
         best_name = generalization.name
-        results = evaluate_models(
-            trained, X_test_final, y_test, bundle.problem_type
-        )
         print(
             f"[Generalization] Selected {best_name}; "
             f"T={generalization.temperature:.3f}, "
-            f"NLL {generalization.nll_before:.4f} -> "
-            f"{generalization.nll_after:.4f}."
+            + (
+                f"NLL {generalization.nll_before:.4f} -> "
+                f"{generalization.nll_after:.4f}."
+                if generalization.nll_before is not None
+                and generalization.nll_after is not None
+                else "calibration skipped (insufficient validation data)."
+            )
         )
     else:
         best_name = max(
             trained, key=lambda name: validation_scores.get(name, -np.inf)
         )
+    # Final evaluation is the first point at which the held-out test set is
+    # used; all selection, tuning, ensembling, and calibration happen above.
+    results = evaluate_models(
+        {best_name: trained[best_name]},
+        X_test_final,
+        y_test,
+        bundle.problem_type,
+    )
     training_seconds = time.monotonic() - training_started
     best_model = trained[best_name]
     train_predictions = best_model.predict(X_train_final)
@@ -663,11 +1160,13 @@ def run(config: RunConfig) -> dict[str, Any]:
             results.loc[results["model"] == best_name, "r2"].iloc[0]
         )
 
+    oob_score = _oob_score(best_model)
     save_model(trained[best_name], str(config.output_dir / "best_model.joblib"))
     save_metrics(results, str(config.output_dir / "metrics.csv"))
 
     plot_paths: list[str] = []
     html_report_path: str | None = None
+    report_started = time.monotonic()
     if config.report:
         try:
             from eda import run_eda
@@ -710,6 +1209,7 @@ def run(config: RunConfig) -> dict[str, Any]:
             ]
         except Exception as exc:
             LOGGER.warning("Plot/HTML report generation failed: %s", exc)
+    reporting_seconds = time.monotonic() - report_started
 
     elapsed = time.monotonic() - started
     usage = _memory_usage()
@@ -720,24 +1220,58 @@ def run(config: RunConfig) -> dict[str, Any]:
         ),
         testing_metric_name: round(testing_metric, 6),
         "training_seconds": round(training_seconds, 3),
+        "downstream_automl_seconds": round(training_seconds, 3),
+        "input_preparation_seconds": round(input_seconds, 3),
+        "reporting_seconds": round(reporting_seconds, 3),
         "total_pipeline_seconds": round(elapsed, 3),
         **{
             key: None if value is None else round(value, 3)
             for key, value in usage.items()
         },
+        "search_models_screened": len(baseline_scores),
+        "search_embedding_version": SEARCH_EMBEDDING_VERSION,
+        "input_metadata": bundle.metadata,
     }
+    summary["fitted_training_metric"] = round(training_metric, 6)
+    summary["primary_cross_validated_metric"] = (
+        None if np.isnan(validation_metric) else round(validation_metric, 6)
+    )
+    summary["held_out_testing_metric"] = round(testing_metric, 6)
+    summary["primary_cross_validated_metric_scope"] = primary_cv_scope
+    summary["generalization_gate_metric"] = (
+        None
+        if generalization_gate_metric is None
+        else round(generalization_gate_metric, 6)
+    )
+    summary["fit_validation_gap"] = (
+        None
+        if np.isnan(validation_metric)
+        else round(training_metric - validation_metric, 6)
+    )
+    summary["validation_test_gap"] = (
+        None
+        if np.isnan(validation_metric)
+        else round(validation_metric - testing_metric, 6)
+    )
+    if oob_score is not None:
+        summary["out_of_bag_score"] = round(oob_score, 6)
     if generalization is not None:
         summary["temperature"] = round(generalization.temperature, 6)
-        summary["calibration_nll_before"] = round(
-            generalization.nll_before, 6
+        summary["calibration_nll_before"] = (
+            None
+            if generalization.nll_before is None
+            else round(generalization.nll_before, 6)
         )
-        summary["calibration_nll_after"] = round(
-            generalization.nll_after, 6
+        summary["calibration_nll_after"] = (
+            None
+            if generalization.nll_after is None
+            else round(generalization.nll_after, 6)
         )
         summary["ensemble_used"] = generalization.ensemble_used
         summary["ensemble_members"] = generalization.members
     report_dir = config.output_dir / "report"
     markdown_path: str | None = None
+    llm_started = time.monotonic()
     if config.llm:
         from llm_explainer import generate_comprehensive_report
 
@@ -751,6 +1285,9 @@ def run(config: RunConfig) -> dict[str, Any]:
                 "problem_type": bundle.problem_type,
             },
             "model": {"name": best_name},
+            "image_input": (
+                bundle.metadata if config.dataset.is_dir() else None
+            ),
             "performance": {
                 "training": training_metric,
                 "validation": (
@@ -777,8 +1314,10 @@ def run(config: RunConfig) -> dict[str, Any]:
             output_path=str(report_dir / "explanation.md"),
             use_llm=True,
         )
+    llm_seconds = time.monotonic() - llm_started
 
     notebook_path: str | None = None
+    notebook_started = time.monotonic()
     if config.notebook:
         try:
             from notebook_generator import generate_advanced_notebook
@@ -801,22 +1340,81 @@ def run(config: RunConfig) -> dict[str, Any]:
             )
         except Exception as exc:
             LOGGER.warning("Notebook generation failed: %s", exc)
+    notebook_seconds = time.monotonic() - notebook_started
 
     elapsed = time.monotonic() - started
-    summary["total_pipeline_seconds"] = round(elapsed, 3)
+    usage = _memory_usage()
+    summary.update(
+        llm_seconds=round(llm_seconds, 3),
+        notebook_seconds=round(notebook_seconds, 3),
+        total_pipeline_seconds=round(elapsed, 3),
+        **{
+            key: None if value is None else round(value, 3)
+            for key, value in usage.items()
+        },
+    )
     manifest = _write_manifest(
         config, bundle.problem_type, best_name, elapsed, summary
     )
     _display_results(results, bundle.problem_type)
     print(f"\nBest model: {best_name}")
     print("\nRun summary")
-    print(f"Training {training_metric_name.split('_', 1)[1]}:   {training_metric:.4f}")
+    print(
+        f"Fitted training {training_metric_name.split('_', 1)[1]} "
+        f"(diagnostic): {training_metric:.4f}"
+    )
     validation_display = (
         "N/A" if np.isnan(validation_metric) else f"{validation_metric:.4f}"
     )
-    print(f"Validation {validation_metric_name.split('_', 1)[1]}: {validation_display}")
-    print(f"Testing {testing_metric_name.split('_', 1)[1]}:    {testing_metric:.4f}")
-    print(f"Total training time: {training_seconds:.1f}s")
+    cv_scope_display = (
+        ", best ensemble-member reference"
+        if primary_cv_scope == "best-ensemble-member-reference"
+        else ""
+    )
+    print(
+        f"Cross-validated {validation_metric_name.split('_', 1)[1]} "
+        f"(primary{cv_scope_display}): {validation_display}"
+    )
+    print(
+        f"Held-out testing {testing_metric_name.split('_', 1)[1]}: "
+        f"{testing_metric:.4f}"
+    )
+    if not np.isnan(validation_metric):
+        print(
+            f"Fit-validation gap: {training_metric - validation_metric:+.4f}"
+        )
+        print(
+            f"Validation-test gap: {validation_metric - testing_metric:+.4f}"
+        )
+    if generalization_gate_metric is not None:
+        print(
+            "Generalization gate accuracy: "
+            f"{generalization_gate_metric:.4f}"
+        )
+    if oob_score is not None:
+        print(f"Out-of-bag accuracy: {oob_score:.4f}")
+    print("\nStage timings")
+    print(f"Input preparation:  {input_seconds:.1f}s")
+    backbone_search = bundle.metadata.get("backbone_search", {})
+    if backbone_search.get("elapsed_seconds") is not None:
+        print(
+            "Backbone search:    "
+            f"{backbone_search['elapsed_seconds']:.1f}s"
+        )
+    if bundle.metadata.get("lora_training_seconds") is not None:
+        print(
+            "LoRA training:      "
+            f"{bundle.metadata['lora_training_seconds']:.1f}s"
+        )
+    if bundle.metadata.get("embedding_and_gate_seconds") is not None:
+        print(
+            "Embedding + gate:   "
+            f"{bundle.metadata['embedding_and_gate_seconds']:.1f}s"
+        )
+    print(f"Downstream AutoML:  {training_seconds:.1f}s")
+    print(f"Plots/HTML report:  {reporting_seconds:.1f}s")
+    print(f"LLM explanation:    {llm_seconds:.1f}s")
+    print(f"Notebook:           {notebook_seconds:.1f}s")
     print(
         f"RAM usage: {_format_usage(usage['ram_current_mb'])} current, "
         f"{_format_usage(usage['ram_peak_mb'])} peak"
@@ -825,6 +1423,16 @@ def run(config: RunConfig) -> dict[str, Any]:
         f"VRAM usage: {_format_usage(usage['vram_current_mb'])} current, "
         f"{_format_usage(usage['vram_peak_mb'])} peak"
     )
+    if bundle.metadata.get("backbone"):
+        print(
+            "Vision backbone: "
+            f"{bundle.metadata.get('backbone_key')} "
+            f"({bundle.metadata['backbone']})"
+        )
+        print(
+            "Representation: "
+            f"{bundle.metadata.get('selected_representation')}"
+        )
     print(f"Artifacts: {config.output_dir}")
     if html_report_path:
         print(f"HTML report: {html_report_path}")

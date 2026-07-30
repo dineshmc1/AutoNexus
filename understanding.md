@@ -1,739 +1,719 @@
-# ML-Builder Understanding
+# ML-Builder: Project Understanding
 
-> Production update: the earlier architecture analysis below describes the
-> research repository before consolidation. `main.py` is now the only public
-> entrypoint. The interactive Phase 4, agentic, benchmark, patch, and scratch
-> runners referenced below have been removed. The stable product contract is
-> the non-interactive tabular CLI documented in `README.md`; memory,
-> multimodal, and agent modules are retained only as internal research code.
+## 1. Executive Summary
 
-This document is my consolidated understanding of the `ML-Builder` repository after reading the repository layout, the main entry points, the core pipeline modules, the agent layer, the memory system, the multi-modal path, and the existing internal documentation.
+ML-Builder is a Python 3.12 command-line AutoML system with one public
+entrypoint: `main.py` (or the installed `ml-builder` command). It accepts:
 
-## 1. What This Project Is
+- Tabular classification or regression data in CSV, XLSX, or XLS format.
+- Image classification data arranged in class-named folders.
 
-`ML-Builder` is a research-oriented AutoML system that tries to go beyond a normal tabular ML pipeline.
+The system separates development data from an untouched test split. Image
+runs automatically shortlist and compare registered frozen backbones before
+optional winner-only adaptation. Both modalities then screen classifiers,
+train with cross-validation, optionally tune and ensemble, calibrate
+classification probabilities, evaluate once on test, and write a reusable
+model plus reports and reproducibility metadata.
 
-At a high level, it combines:
+The production distribution is explicitly declared in `pyproject.toml`.
+Historical FAISS, W&B, agentic, and NAS prototypes are not imported by
+`main.py` and are not included in the built wheel.
 
-- A conventional tabular AutoML flow for loading data, cleaning, feature engineering, training, evaluation, and reporting.
-- A meta-learning layer that stores previous experiment outcomes in a FAISS-backed memory store.
-- A learned task encoder that maps dataset fingerprints into an embedding space so similar datasets can retrieve similar winning configurations.
-- An LLM-assisted routing and recommendation layer.
-- A second path for multi-modal data such as vision, audio, text, and video.
-- An optional agentic workflow that uses several LLM-driven “agents” to critique and plan the pipeline before execution.
-
-The repository contains both:
-
-- A cleaner, more standard CLI pipeline in `main.py`.
-- A larger, more experimental “Phase 4” pipeline in `phase4_pipeline.py`.
-
-That split matters: the repo is not one perfectly unified system yet. It is more like a mainline AutoML project plus a research branch that became part of the same codebase.
-
-## 2. Main Execution Paths
-
-There are three real entry styles in this repo.
-
-### A. Legacy / Standard AutoML path
-
-Entrypoint: `main.py`
-
-This path is a classic tabular pipeline:
-
-1. Load dataset
-2. Clean dataset
-3. Analyze resource constraints
-4. Optionally run feature engineering
-5. Build preprocessing pipeline
-6. Run baseline model screening
-7. Train promising models fully
-8. Evaluate and select the best model
-9. Optionally tune
-10. Generate EDA, explanations, and HTML report
-
-This path does not really depend on meta-learning memory or paradigm routing.
-
-### B. Meta-learning / research path
-
-Entrypoint: `phase4_pipeline.py`
-
-This is the most important file architecturally. It introduces:
-
-- Dataset embedding
-- Siamese task encoder
-- FAISS memory retrieval
-- Cold-start vs memory-based reuse
-- LLM model suggestions
-- Heuristic model suggestions
-- Paradigm routing between AutoML and AutoDL
-- SHAP reporting and LLM narrative reporting
-
-For tabular datasets, this is the “smart” path.
-
-For non-tabular datasets, this file also acts as the bridge into the multi-modal flow.
-
-### C. Agentic orchestration path
-
-Entrypoint: `run_agentic_pipeline.py`
-
-This path runs a sequence of LLM-based agents first, then, if the critic approves, hands execution back to the Phase 4 pipeline.
-
-So the agentic layer is not a separate trainer. It is more of a planning, reviewing, and approval layer sitting in front of the main execution pipeline.
-
-## 3. High-Level Architecture
+## 2. System Boundary
 
 ```mermaid
-graph TD
-    A[User Input / Dataset Path] --> B{Onboarding / Path Type}
-    B -->|CSV / Excel| C[Tabular Path]
-    B -->|Folder with images audio text video| D[Multi-modal Path]
-
-    C --> E[data_loader.py]
-    E --> F[data_cleaner.py]
-    F --> G[resource_manager.py]
-    G --> H[feature_engineering.py]
-    H --> I[feature_processing.py]
-
-    C --> J[dataset_embedding.py]
-    J --> K[task_encoder.py]
-    K --> L[cold_start.py / MemoryStore]
-    L --> M[llm_suggester.py]
-    L --> N[heuristics.py]
-    M --> O[paradigm_router.py]
-    N --> O
-    L --> O
-
-    O -->|AutoML| P[hpo_optuna.py + model_trainer.py]
-    O -->|AutoDL| Q[auto_dl_nas.py or hybrid embedding-based DL path]
-
-    D --> R[multimodal_extractor.py]
-    D --> S[lora_adapter_trainer.py]
-    R --> Q
-
-    P --> T[shap_explainer.py]
-    Q --> T
-    T --> U[llm_explainer.py]
-    U --> V[report_generator.py]
-    U --> W[notebook_generator.py]
-
-    X[agents/agent_orchestrator.py] --> Y[data_agent.py]
-    X --> Z[business_agent.py]
-    X --> AA[feature_agent.py]
-    X --> AB[model_agent.py]
-    X --> AC[critic_agent.py]
-    X --> C
+flowchart LR
+    User[User / shell] --> CLI[main.py / ml-builder]
+    CLI --> Input{Input type}
+    Input -->|CSV / Excel| Tabular[Tabular loader]
+    Input -->|Directory| Vision[Grouped split and automatic backbone tournament]
+    Tabular --> AutoML[Unified AutoML path]
+    Vision --> AutoML
+    AutoML --> Selection[Validation-only selection]
+    Selection --> Test[One final held-out test]
+    Test --> Artifacts[Model, metrics, manifest, reports]
+    Artifacts --> User
 ```
 
-## 4. Actual Workflow By Data Type
+The stable contract ends at the CLI and its artifacts. FAISS memory learning,
+W&B experiment tracking, autonomous agents, audio/video/text embedding, and
+neural architecture search are not production runtime features.
 
-### 4.1 Tabular workflow
+## 3. Main Execution Path
+
+```mermaid
+flowchart TD
+    A[main argv] --> B[build_parser]
+    B --> C[_config_from_args]
+    C -->|dataset omitted| D[Prompt for path]
+    D --> C
+    C -->|tabular and target omitted| E[Prompt for target]
+    E --> C
+    C --> F[run RunConfig]
+    F --> G[_load_input]
+    G --> H[Create leakage-safe development and test boundary]
+    H --> I[ResourceManager analysis]
+    I --> J[Cheap baseline / landmark screen]
+    J --> K[Write search_profile.json]
+    K --> L[Optional feature engineering]
+    L --> M[Cross-validated full training, primary selection signal]
+    M --> N[Optional CV-ranked HPO]
+    N --> O[Classification ensemble/calibration]
+    O --> P[Final test evaluation]
+    P --> Q[Atomic model and metrics save]
+    Q --> R[Reports, Markdown, notebook]
+    R --> S[run.json and terminal summary]
+```
+
+`RunConfig` is the immutable run contract. CLI values are validated before
+training, paths are resolved, and image folders never require a target option.
+The interactive path prompt also parses trailing options such as
+`--adapt-lora`. Selecting a folder named `train` automatically resolves to its
+parent when a sibling `test` folder is present.
+
+## 4. Input Workflows
+
+### 4.1 Tabular Input
+
+```mermaid
+flowchart TD
+    A[CSV / XLSX / XLS] --> B[Read with pandas]
+    B --> C[Validate rows, target, missing labels, features]
+    C --> D[Infer or accept problem type]
+    D --> E[Encode classification target]
+    E --> F[Stratified train/test split]
+    F --> G[Infer ID columns from development only]
+    G --> H[Apply same ID removal to test]
+    H --> I[DataBundle]
+```
+
+Important boundary: target-correlated feature removal is not automated.
+Computing such a rule before the split would inspect test labels, and a highly
+predictive legitimate feature can look identical to leakage. Domain-specific
+leakage columns should be removed explicitly upstream.
+
+### 4.2 Image Input With Explicit Splits
+
+```mermaid
+flowchart TD
+    A[dataset root] --> B{train and test exist?}
+    B -->|yes| C[Discover train class folders]
+    B -->|yes| D[Discover optional val class folders]
+    B -->|yes| E[Discover test class folders]
+    C --> F[Development paths]
+    D --> F
+    C --> G[LoRA candidate data: train only]
+    E --> H[Untouched test paths]
+    F --> I[Embed development]
+    H --> J[Embed test separately]
+```
+
+The optional `val/` folder joins downstream development data and acts as the
+outer frozen-versus-adapted representation gate when available. LoRA itself
+uses only `train/` and creates a separate internal early-stopping split. The
+explicit `test/` folder is not used by adaptation, representation selection,
+screening, model selection, ensembling, or calibration.
+
+### 4.3 Image Input Without Explicit Splits
+
+```mermaid
+flowchart TD
+    A[dataset/class/images] --> B[Discover all paths and parent labels]
+    B --> C[Infer subject, video-folder, or frame-sequence groups]
+    C --> D{Reliable repeated groups?}
+    D -->|yes| E[Stratified group split]
+    D -->|no| F[Stratified image split]
+    E --> G[Development paths]
+    F --> G
+    E --> H[Reserved test paths]
+    F --> H
+    G --> I[Automatic frozen backbone tournament]
+    I --> J[Optional winner adaptation gate]
+    J --> L[Development embeddings]
+    H --> K[Test embeddings after representation is fixed]
+```
+
+Splitting happens on file paths before model loading. Group inference is
+conservative: ambiguous or mostly unique identifiers fall back to ordinary
+stratification instead of inventing false groups. This reduces frame/session
+leakage when a dataset contains repeated video or subject observations. Cache
+keys are split-specific, so development and test embeddings cannot be
+accidentally combined through the cache.
+
+## 5. Image Backbone, Embedding, and LoRA Workflows
+
+### 5.1 Embedding Cache
+
+```mermaid
+flowchart TD
+    A[Explicit paths + labels] --> B[Hash cache version]
+    B --> C[Hash model ID]
+    C --> D[Hash adapter files]
+    D --> E[Hash path, size, mtime, label]
+    E --> F{Cache hit?}
+    F -->|yes| G[Load FP16, timing metadata, cast FP32]
+    F -->|no| H[Lazy-load selected AutoModel]
+    H --> I[Batch inference]
+    I --> J[Flatten transformer or CNN output]
+    J --> K[L2-normalize embeddings]
+    K --> L[Atomic FP16 plus extraction-time save]
+    L --> G
+```
+
+FP16 is a disk/storage optimization only. Values are restored to FP32 before
+scikit-learn training. The cache identity includes its schema version, model
+ID, resolved upstream commit, adapter file signature, cache-stage key, and
+every file path, size, mtime, and label. The same resolved commit is used to
+load the processor and weights. Historical extraction time is stored so a
+cache hit cannot obtain an artificial latency advantage in a later tournament.
+
+### 5.2 Automatic Backbone Tournament
+
+```mermaid
+flowchart TD
+    A[Development image paths only] --> B[Vision registry]
+    B --> C[RAM, VRAM, device compatibility filter]
+    C --> D[10 percent, 2-fold frozen probes]
+    D --> E[Keep top 3]
+    E --> F[30 percent, 3-fold frozen probes]
+    F --> G[Keep top 2]
+    G --> H[100 percent, up to 5-fold probes]
+    H --> I[Accuracy, variance, NLL, latency, RAM, VRAM score]
+    I --> J[Statistical tie and faster-model guard]
+    J --> K[Selected frozen backbone]
+    K --> L[Only now may adaptation run]
+    K -. no test images used .-> M[Untouched test boundary]
+```
+
+The registry includes CLIP ViT-B/32, DINOv2 Small, ResNet-50, and SigLIP Base.
+It records family, model ID, input size, expected dimension, parameter count,
+RAM/VRAM estimates, batch size, license identifier, and adaptation strategy.
+SigLIP is excluded on CPU-only runs, and any candidate outside conservative
+available-memory limits is removed before model loading.
+
+Every stage uses the same regularized logistic probe and group-aware folds.
+Stage samples are nested, so newly embedded rows accumulate rather than
+recomputing earlier rows. The ranking score is:
 
 ```text
-CSV/Excel
-  -> load_dataset / load_local_dataset
-  -> clean
-  -> resource analysis
-  -> feature engineering and preprocessing
-  -> compute dataset fingerprint
-  -> encode fingerprint into learned embedding
-  -> query FAISS memory
-  -> combine memory + heuristics + LLM signals
-  -> route to AutoML or AutoDL
-  -> train / optimize
-  -> explain
-  -> generate report and notebook
-  -> optionally write back to memory
+mean_accuracy
+- 0.25 * fold_accuracy_standard_deviation
+- normalized_NLL_penalty
+- latency_penalty
+- RAM_penalty
+- VRAM_penalty
 ```
 
-### 4.2 Multi-modal workflow
+Accuracy remains dominant. A smaller model wins only within a statistical
+tie. A slower candidate cannot replace a faster tied candidate unless it
+improves accuracy by at least `0.002` or NLL by at least `0.01`. The
+cooperative `--backbone-time` budget is checked between candidates and stages.
+Candidate failures are isolated; CLIP is retained as the final fallback.
 
-```text
-Image / audio / text / video folder
-  -> onboarding detects modality
-  -> select domain-specific foundation model
-  -> optionally train or reuse LoRA adapter
-  -> extract embeddings
-  -> reduce / prepare embeddings
-  -> force AutoDL / hybrid ML-on-embeddings path
-  -> run search / ensemble
-  -> evaluate
-  -> explain and report
-  -> optionally store modality-specific memory
+### 5.3 Frozen-versus-Adapted Winner
+
+```mermaid
+flowchart TD
+    A[Selected frozen backbone] --> B{adapt-lora requested and supported?}
+    B -->|no| C[Keep frozen winner]
+    B -->|yes| D[Outer development probe/gate split]
+    D --> E[Group-aware adapter train/early-stop split]
+    E --> F[Training-only augmentation]
+    F --> G[AdamW weight decay plus backbone-specific q/v LoRA]
+    G --> H[Restore lowest validation-NLL adapter]
+    D --> I[Frozen winner probe/gate embeddings]
+    H --> J[Adapted winner probe/gate embeddings]
+    I --> K[Same logistic acceptance probe]
+    J --> K
+    K -->|adapted wins| L[Use adapted winner]
+    K -->|no reliable gain| C
+    L --> M[Embed untouched test]
+    C --> M
 ```
 
-### 4.3 Agentic workflow
+Gradient checkpointing is enabled for supported transformer winners on CUDA
+devices with at most 12 GB VRAM. Augmentation is training-only and directional
+labels disable horizontal flips. The gate accepts adaptation when accuracy
+improves by at least `0.002` without material NLL regression, or accuracy is
+non-worse while NLL improves by at least `0.01`. ResNet is frozen-only because
+transformer q/v LoRA is invalid for convolutional blocks. Training, adapted
+embedding, or adapted-test failure restarts the representation step in frozen
+mode using cached tournament embeddings.
 
-```text
-Dataset path
-  -> DataUnderstandingAgent
-  -> BusinessContextAgent
-  -> CriticAgent pass 1
-  -> FeatureEngineeringAgent
-  -> ModelSelectionAgent
-  -> CriticAgent pass 2
-  -> final report / plan
-  -> if approved, execute main pipeline
+### 5.4 Backbone and Classifier Decisions
+
+```mermaid
+flowchart LR
+    A[Backbone tournament] --> B[Frozen or accepted adapted representation]
+    B --> C[Downstream baseline screen]
+    C --> D[Logistic / ExtraTrees / boosting]
+    D --> E[Group-aware CV and optional HPO]
+    E --> F[Optional diverse ensemble]
+    F --> G[Held-out test once]
 ```
 
-## 5. Key Architectural Ideas
-
-### 5.1 Dataset fingerprinting
-
-The project computes a compact vector describing a dataset statistically. Based on the code and docs, it includes things like:
-
-- Number of samples
-- Number of features
-- Sample-to-feature ratio
-- Missingness
-- Skewness
-- Correlation structure
-- Class count / target entropy
-
-That is the raw dataset representation used for memory retrieval.
-
-### 5.2 Learned task encoder
-
-The raw fingerprint is not used directly forever. A Siamese encoder in `task_encoder.py` learns a 32D representation intended to place datasets requiring similar model families closer together.
-
-This is one of the main research ideas in the repo.
-
-### 5.3 FAISS memory
-
-The memory layer stores:
-
-- Dataset embedding
-- Best model(s)
-- Metadata like score, timing, and hyperparameters
-
-The store is persisted mainly in:
-
-- `memory_store.faiss`
-- `memory_store.pkl`
-
-The purpose is to warm-start future searches and avoid fully starting from scratch each time.
-
-### 5.4 Cold-start decision
-
-The system does not blindly trust retrieved neighbors. `cold_start.py` computes a weighted score using:
-
-- Similarity
-- Past performance
-- Recency
-
-Then it compares that against an adaptive threshold. If the neighbor quality is too weak, it falls back to broader search.
-
-### 5.5 Paradigm router
-
-The repo has a second, separate routing problem:
-
-- Should this dataset use classical AutoML?
-- Or should it use the AutoDL / hybrid path?
-
-That decision is made in `paradigm_router.py` by combining:
-
-- LLM score
-- Memory score
-- Heuristic score
-
-This is a higher-level decision than cold-start.
-
-### 5.6 Multi-modal support
-
-For vision, audio, text, and video, the system extracts embeddings using foundation-model-style encoders and then trains downstream models or ensembles over those embeddings.
-
-In practice, the multi-modal path is less “end-to-end deep learning training from raw input” and more “embedding extraction + downstream optimization + optional LoRA adaptation”.
-
-## 6. What The Important Top-Level Files Are Doing
-
-### Core entry and orchestration
-
-- `main.py`
-  Legacy but usable CLI pipeline for tabular AutoML. It is more structured and easier to follow than `phase4_pipeline.py`.
-
-- `phase4_pipeline.py`
-  Main research orchestrator. This is the central file for memory, routing, AutoML vs AutoDL branching, SHAP generation, reporting, and the interactive ingestion flow.
-
-- `phase4_pipeline_new.py`
-  Alternate / earlier or parallel version of the Phase 4 pipeline. It appears to preserve another iteration of the same research pipeline rather than being the active stable replacement.
-
-- `run_metaautoml(ml).py`
-  Benchmark-style runner for a tabular dataset with memory loading, encoder loading, pipeline execution, RAM monitoring, and result printing.
-
-- `run_metaautoml(dl).py`
-  Benchmark-style runner for the deep / multi-modal path. It initializes W&B, ensures LoRA adapter availability, extracts embeddings, runs the pipeline, and reports RAM/VRAM/time.
-
-- `run_agentic_pipeline.py`
-  Runs the agentic planner / reviewer stack, and if approved, triggers actual training through the main pipeline.
-
-### Data ingestion and cleaning
-
-- `data_loader.py`
-  Handles reading local tabular datasets, detecting problem type, and checking for things like leakage or suspicious columns.
-
-- `data_cleaner.py`
-  Removes duplicates and imputes missing values while keeping target alignment safe.
-
-- `dataset_profiler.py`
-  Builds a compact structural profile of a dataset for LLM prompting and routing.
-
-- `onboarding_agent.py`
-  First user-facing intake logic. Detects modality and gathers context such as target column and business intent.
-
-### Feature engineering and preprocessing
-
-- `feature_engineering.py`
-  The adaptive feature-engineering engine. It applies skew fixes, category handling, interactions, ratios, and some text-stat extraction depending on data and configured FE level.
-
-- `feature_processing.py`
-  Builds the sklearn preprocessing pipeline, likely via `ColumnTransformer`, with scaling and encoding choices.
-
-- `resource_manager.py`
-  Prevents the pipeline from doing expensive transformations or model searches that do not fit the dataset size or cardinality.
-
-### Meta-learning and memory
-
-- `dataset_embedding.py`
-  Computes the raw statistical fingerprint vector for a dataset.
-
-- `task_encoder.py`
-  Defines, trains, loads, and applies the Siamese task encoder used to move from raw fingerprint space into learned embedding space.
-
-- `cold_start.py`
-  Contains the memory store, FAISS index logic, adaptive thresholding, retrieval scoring, fallback logic, and persistence utilities.
-
-- `build_memory.py`
-  Bulk memory builder. Trains on many datasets, stores winners in memory, and is one of the main offline preparation scripts.
-
-- `preseed_memory.py`
-  Another memory seeding script, likely an earlier or lighter route to initialize the memory store.
-
-- `delete_memory.py`
-  Removes items from memory.
-
-- `extract_memory.py`
-  Exports or inspects memory content for analysis.
-
-- `update_memory_hparams.py`
-  Updates stored hyperparameter metadata inside memory records.
-
-- `unified_memory.py`
-  A broader memory abstraction that tries to support both ML and DL paradigms in one place.
-
-### Model training and selection
-
-- `model_trainer.py`
-  Defines the model catalog and runs baseline and fuller training loops.
-
-- `model_selector.py`
-  Evaluates models, compares them, saves metrics/models, and can tune top candidates.
-
-- `hpo_optuna.py`
-  Runs Optuna-based hyperparameter search, including warm-starting from memory.
-
-- `multi_objective.py`
-  Converts pure score into a utility function that also rewards speed and lower complexity.
-
-- `weight_search.py`
-  Experiments with weight combinations, likely for retrieval or utility-related settings.
-
-- `routing_engine.py`
-  Combines different recommendation signals and ranks candidate models.
-
-- `heuristics.py`
-  Rule-based model recommendations based on dataset properties.
-
-- `llm_suggester.py`
-  LLM-based model shortlist generation with output validation.
-
-- `paradigm_router.py`
-  Decides between classical ML and DL-style pipeline execution.
-
-### Explainability and reporting
-
-- `explainer.py`
-  General explanation orchestration, likely including feature importance and SHAP hooks for the standard pipeline.
-
-- `shap_explainer.py`
-  Standalone SHAP explanation generator for the Phase 4 flow.
-
-- `llm_explainer.py`
-  Converts technical results into a consultant-style narrative report.
-
-- `report_generator.py`
-  Generates a standalone HTML report.
-
-- `notebook_generator.py`
-  Creates analysis notebooks for results and EDA.
-
-- `eda.py`
-  Generates exploratory visual artifacts.
-
-- `confidence_calibration.py`
-  Evaluates confidence calibration and reliability behavior.
-
-- `shap_explainer.py`
-  Produces SHAP outputs and top features.
-
-### Multi-modal and DL-related
-
-- `multimodal_extractor.py`
-  The main multi-modal embedding extractor. This is the key file for vision/audio/text/video representations.
-
-- `domain_registry.py`
-  Maps domains to preferred backbone models or extractor choices.
-
-- `lora_config.py`
-  Stores LoRA-related configuration choices.
-
-- `lora_adapter_trainer.py`
-  Fine-tunes or trains modality/domain-specific LoRA adapters.
-
-- `dl_faiss_memory.py`
-  Separate FAISS memory layer for deep / modality-specific embedding experiments.
-
-- `auto_dl_nas.py`
-  Search-space and objective definition for neural architecture search or downstream DL optimization.
-
-### Agent system
-
-- `agents/agent_orchestrator.py`
-  Coordinates the full multi-agent flow.
-
-- `agents/data_agent.py`
-  Understands the dataset and proposes a structured profile.
-
-- `agents/business_agent.py`
-  Translates business context into ML objectives and constraints.
-
-- `agents/feature_agent.py`
-  Recommends feature-engineering decisions.
-
-- `agents/model_agent.py`
-  Uses memory and LLM context to recommend model choices.
-
-- `agents/critic_agent.py`
-  Reviews and challenges the plan for mismatch, leakage, and feasibility issues.
-
-- `agents/notebook_generator.py`
-  Agent-specific notebook generation helper.
-
-### MetaAutoML package files
-
-These appear to be a more modularized subpackage that complements or prototypes pieces of the top-level pipeline:
-
-- `metaautoml/pipelines/automl_router.py`
-  Router for AutoML-related decisions or flow control.
-
-- `metaautoml/pipelines/autodl_router.py`
-  Router for AutoDL-specific execution.
-
-- `metaautoml/pipelines/stacking_integration.py`
-  Stacking ensemble helpers and integration logic.
-
-- `metaautoml/nas/downstream_nas.py`
-  NAS logic for downstream tasks.
-
-- `metaautoml/nas/regularized_objective.py`
-  A regularized objective class for search / optimization.
-
-- `metaautoml/ensembles/oof_stacking.py`
-  Out-of-fold stacking implementation with attention to leakage prevention.
-
-- `metaautoml/ensembles/downstream_bagging.py`
-  Bagging helper for downstream workflows.
-
-- `metaautoml/ensembles/embedding_cache.py`
-  Caching manager for expensive embedding computations.
-
-- `metaautoml/evaluation/calibration_shap.py`
-  Evaluation utilities combining calibration and SHAP ideas.
-
-- `metaautoml/data/gpu_tabular_loader.py`
-  GPU-oriented tabular data loader / preprocessing helper.
-
-## 7. Tests and Validation Files
-
-- `test_cold_start.py`
-  Exercises memory retrieval and cold-start logic.
-
-- `test_embedding.py`
-  Tests dataset embedding or encoder behavior.
-
-- `test_unified_memory.py`
-  Tests the unified memory abstraction.
-
-- `test_agentic_pipeline.py`
-  Tests the multi-agent orchestration behavior.
-
-- `tests/test_oof_leakage.py`
-  Important test verifying out-of-fold stacking is not leaking information.
-
-- `tests/test_ensemble_gpu.py`
-  Checks GPU-related ensemble behavior.
-
-These tests suggest the repo’s strongest explicit validation focus is around:
-
-- Memory / retrieval
-- Stacking leakage
-- GPU ensemble behavior
-
-The project appears less comprehensively unit-tested in other areas than a productionized library would be.
-
-## 8. Non-Code Artifacts and What They Mean
-
-### Documentation
-
-- `README.md`
-  Project-facing overview and positioning document.
-
-- `walkthrough.md`
-  A system walkthrough that explains the architecture in prose.
-
-- `codebase_analysis.md`
-  Another internal analysis file that already summarizes much of the repository.
-
-### Model and memory artifacts
-
-- `task_encoder.pt`
-  Saved trained weights for the Siamese task encoder.
-
-- `memory_store.faiss`
-  Saved FAISS index for the main memory store.
-
-- `memory_store.pkl`
-  Pickled metadata for memory entries.
-
-- `dl_memory_vision.faiss`, `dl_memory_video.faiss`
-  Modality-specific deep-learning memory indices.
-
-- `dl_metadata_vision.json`, `dl_metadata_video.json`
-  Metadata for deep-learning memory stores.
-
-- `lora_adapters/...`
-  Saved LoRA adapter artifacts and configs.
-
-- `embedding_cache/*.npz`
-  Cached extracted embeddings to avoid repeating expensive extraction.
-
-### Reports and outputs
-
-- `reports/`
-  Generated reports, likely notebooks, plots, markdown consultant reports, and HTML outputs.
-
-- `shap_plots/`
-  SHAP visual outputs.
-
-- `wandb/`
-  Weights & Biases run artifacts.
-
-### Logs and scratch files
-
-There are many files that are clearly experiment outputs, debug logs, or one-off scripts:
-
-- `clean_logs.txt`
-- `fe_test_log*.txt`
-- `test_log*.txt`
-- `stress_test.log`
-- `run_err.log`
-- `scratch_*.py`
-- `patch_phase4.py`
-- `refactor_script*.py`
-- `refactor_phase4_final.py`
-
-My interpretation is that this repo is under active research-style development, so these files capture experiments, patching, ad hoc analysis, and iteration history rather than core product code.
-
-## 9. Package / Dependency Intent
-
-From the code and config files, the project is built around:
-
-- `pandas`, `numpy`
-- `scikit-learn`
-- `optuna`
-- `faiss`
-- `torch`
-- `transformers`
-- `sentence-transformers`
-- `peft`
-- `wandb`
-- `shap`
-- `litellm`
-
-So the system is basically:
-
-- sklearn for tabular pipelines
-- PyTorch / HF tooling for learned embeddings and adapters
-- FAISS for memory retrieval
-- Optuna for search
-- W&B for experiment tracking
-- litellm for model-agnostic LLM calls
-
-## 10. How I Think The Repo Is Organized Conceptually
-
-I would describe the repository as five concentric layers:
-
-1. Data and preprocessing layer
-2. Model training and evaluation layer
-3. Meta-learning memory layer
-4. LLM / routing / agent intelligence layer
-5. Reporting and artifact layer
-
-The most novel layer is the meta-learning memory layer.
-The most practically usable layer is still the standard AutoML tabular pipeline.
-The most experimental layer is the Phase 4 + multi-modal + agentic combination.
-
-## 11. Strengths I See In The Design
-
-- Clear ambition to reduce repeated search via memory.
-- Good separation between retrieval, routing, training, and reporting at the conceptual level.
-- Useful fallback behavior when LLMs are unavailable.
-- Resource-aware controls to prevent runaway preprocessing or search.
-- Explicit concern for explainability, calibration, and reporting.
-- Multi-modal support is meaningfully integrated rather than just named.
-- There is evidence of research thinking around leakage prevention and fair validation.
-
-## 12. Risks / Complexity I See
-
-- `phase4_pipeline.py` is very large and mixes many concerns in one file.
-- There are multiple generations of pipeline code living together.
-- Some top-level scripts are clearly experiment-oriented and may not all be equally current.
-- The codebase has strong research energy, but less evidence of strict production packaging boundaries.
-- The `metaautoml/` package suggests an ongoing refactor or modularization effort that may not yet be complete.
-
-## 13. File Inventory Summary
-
-This is a concise inventory of the visible project files by purpose.
-
-### Root configuration and docs
-
-- `.env`, `.env.example`
-- `.gitignore`, `.python-version`
-- `pyproject.toml`, `requirements.txt`, `uv.lock`
-- `README.md`, `walkthrough.md`, `codebase_analysis.md`
-
-### Main pipeline and orchestration
-
-- `main.py`
-- `phase4_pipeline.py`
-- `phase4_pipeline_new.py`
-- `run_metaautoml(ml).py`
-- `run_metaautoml(dl).py`
-- `run_agentic_pipeline.py`
-
-### Data / profiling / onboarding
-
-- `data_loader.py`
-- `data_cleaner.py`
-- `dataset_profiler.py`
-- `onboarding_agent.py`
-
-### Feature and resource logic
-
-- `feature_engineering.py`
-- `feature_processing.py`
-- `resource_manager.py`
-
-### Memory and meta-learning
-
-- `dataset_embedding.py`
-- `task_encoder.py`
-- `cold_start.py`
-- `unified_memory.py`
-- `build_memory.py`
-- `preseed_memory.py`
-- `delete_memory.py`
-- `extract_memory.py`
-- `update_memory_hparams.py`
-- `weight_search.py`
-
-### Training, routing, optimization
-
-- `model_trainer.py`
-- `model_selector.py`
-- `hpo_optuna.py`
-- `multi_objective.py`
-- `routing_engine.py`
-- `heuristics.py`
-- `llm_suggester.py`
-- `paradigm_router.py`
-- `auto_dl_nas.py`
-
-### Explainability and output
-
-- `explainer.py`
-- `shap_explainer.py`
-- `llm_explainer.py`
-- `report_generator.py`
-- `notebook_generator.py`
-- `eda.py`
-- `confidence_calibration.py`
-- `wandb_logger.py`
-
-### Multi-modal support
-
-- `multimodal_extractor.py`
-- `domain_registry.py`
-- `lora_config.py`
-- `lora_adapter_trainer.py`
-- `dl_faiss_memory.py`
-
-### Agent system
-
-- `agents/agent_orchestrator.py`
-- `agents/data_agent.py`
-- `agents/business_agent.py`
-- `agents/feature_agent.py`
-- `agents/model_agent.py`
-- `agents/critic_agent.py`
-- `agents/notebook_generator.py`
-
-### Modular `metaautoml` package
-
-- `metaautoml/pipelines/automl_router.py`
-- `metaautoml/pipelines/autodl_router.py`
-- `metaautoml/pipelines/stacking_integration.py`
-- `metaautoml/nas/downstream_nas.py`
-- `metaautoml/nas/regularized_objective.py`
-- `metaautoml/ensembles/oof_stacking.py`
-- `metaautoml/ensembles/downstream_bagging.py`
-- `metaautoml/ensembles/embedding_cache.py`
-- `metaautoml/evaluation/calibration_shap.py`
-- `metaautoml/data/gpu_tabular_loader.py`
-
-### Tests
-
-- `test_cold_start.py`
-- `test_embedding.py`
-- `test_unified_memory.py`
-- `test_agentic_pipeline.py`
-- `tests/test_oof_leakage.py`
-- `tests/test_ensemble_gpu.py`
-
-### Saved artifacts / caches
-
-- `memory_store.faiss`
-- `memory_store.pkl`
-- `task_encoder.pt`
-- `dl_memory_*.faiss`
-- `dl_metadata_*.json`
-- `embedding_cache/*`
-- `lora_adapters/*`
-- `reports/*`
-- `wandb/*`
-- `shap_plots/*`
-
-### Logs / outputs / scratch / temporary work
-
-- `test_output.txt`
-- `test_log*.txt`
-- `clean_logs.txt`
-- `fe_test_log*.txt`
-- `stress_test.log`
-- `err.log`
-- `run_err.log`
-- `scratch_*.py`
-- `refactor_*.py`
-- `patch_phase4.py`
-- `multi_objective_report.pdf`
-
-## 14. Final Understanding In One Paragraph
-
-This project is a hybrid of an AutoML framework and a research platform for memory-augmented model selection. The central idea is that each dataset gets embedded into a compact representation, retrieved against a FAISS knowledge base of earlier experiments, and then routed through either a classical AutoML path or a DL / embedding-driven path with help from heuristics and LLM reasoning. Around that core, the repo adds reporting, SHAP explainability, W&B logging, optional LoRA-based multi-modal support, and a planning/review layer of LLM agents. The codebase is ambitious and fairly rich, with the clearest “core brain” living in `phase4_pipeline.py`, the memory machinery in `cold_start.py` and `task_encoder.py`, and the practical tabular baseline living in `main.py`.
+Backbone selection and classifier selection are independent. The first chooses
+the representation. The second chooses the estimator operating on that
+representation. LiteLLM receives results only after training for narrative
+reporting and has no code path into either selection decision.
+
+## 6. AutoML Workflow
+
+### 6.1 Resource Analysis and Shortlisting
+
+```mermaid
+flowchart TD
+    A[Development data] --> B[ResourceManager]
+    B --> C[Dataset size category]
+    B --> D[Cardinality and encoding directives]
+    B --> E[Candidate model defaults]
+    C --> F[CV and interaction limits]
+    D --> G[Fold-safe preprocessor]
+    E --> H[Lazy optional model imports]
+    G --> I[10 percent budgeted baseline screen]
+    H --> I
+    I --> J[Prune weak candidates]
+    I --> K[Landmark scores]
+    K --> L[Versioned 16D search embedding]
+```
+
+The baseline screen is the model-shortlist gatekeeper. It uses a stratified
+sample for classification, at most two folds, and a separate time budget.
+The search embedding combines statistical meta-features with observed
+landmark performance. It is persisted for future retrieval systems, but the
+production CLI does not currently query FAISS.
+
+### 6.2 Feature and Preprocessing Workflow
+
+```mermaid
+flowchart TD
+    A[Development DataFrame] --> B{Feature engineering enabled?}
+    B -->|yes| C[Fit FeatureEngineer on development]
+    C --> D[Interactions, ratios, transforms, outlier caps]
+    D --> E[Transform test with learned state]
+    B -->|no| F[Original features]
+    E --> G[Build ColumnTransformer]
+    F --> G
+    G --> H[Numeric imputation/scaling]
+    G --> I[Categorical OHE/hash/target encoding policy]
+    H --> J[Fold-local fit]
+    I --> J
+    J --> K[Shared joblib preprocessing cache]
+```
+
+High-cardinality binary/regression target encoding is regularized and
+out-of-fold. Multiclass high-cardinality data uses frequency encoding instead
+of assigning an artificial numeric order to class labels.
+
+Dense image embeddings bypass scaling when the embedding heuristic applies,
+preserving their learned geometry and avoiding unnecessary copies.
+
+### 6.3 Training and Early Stopping
+
+```mermaid
+flowchart TD
+    A[Shortlisted estimators] --> B{Reliable image groups?}
+    B -->|yes| C[Stratified group K-fold]
+    B -->|no| D[Stratified K-fold or K-fold]
+    C --> E[Fit preprocessing on fold train]
+    D --> E
+    E --> F[Transform fold train and validation]
+    F --> G{XGBoost / LightGBM?}
+    G -->|yes| H[Validation eval_set + early stopping]
+    G -->|no| I[Normal estimator fit]
+    H --> J[Fold score]
+    I --> J
+    J --> K[Mean validation score, primary]
+    K --> L[Clean refit on all development data]
+```
+
+Class-aware fold counts are capped by the smallest class. This keeps every
+classification fold valid and prevents multiclass labels from becoming
+misaligned with XGBoost probability matrices. For grouped images, the fold
+count is also capped by groups per class and no inferred video/subject group
+can occur in both fold partitions.
+
+The shared preprocessing cache reuses identical fold transformations across
+model candidates. It never reuses a transformer fitted on validation or test
+data. Logistic regression is retained as the linear control. ExtraTrees uses
+bounded depth, larger leaves, feature subsampling, bootstrapped row sampling,
+and OOB scoring instead of unconstrained memorization.
+
+### 6.4 Optional Hyperparameter Search
+
+```mermaid
+flowchart TD
+    A[Trained candidates + CV scores] --> B[Rank by validation score]
+    B --> C[Top two candidates]
+    C --> D[Grid or randomized group-aware CV search]
+    D --> E[Best estimator and CV score]
+    E --> F[Update candidate and validation score]
+```
+
+The held-out test metrics are not available to this workflow. This is a
+critical production correction: earlier code ranked tuning candidates using
+test results, which leaked test information into model selection. ExtraTrees
+searches depth, leaf size, split size, feature fraction, tree count, and
+bootstrapped sample fraction when `--tune` is enabled.
+
+### 6.5 Diversity and Temperature Scaling
+
+```mermaid
+flowchart TD
+    A[Final fitted classifiers] --> B[Best CV model per family]
+    B --> C[GBDT candidate]
+    B --> D[Linear candidate]
+    B --> E[Nonlinear candidate]
+    C --> F[Development-only validation split]
+    D --> F
+    E --> F
+    F --> G[Compare single model and probability average]
+    G --> H{Ensemble improves and agrees with CV?}
+    H -->|yes| I[Use diverse ensemble]
+    H -->|no| J[Use best single model]
+    I --> K[Optimize scalar temperature for NLL]
+    J --> K
+    K --> L[Accept only non-worsening NLL]
+```
+
+The ensemble is not mandatory. It must contain one available member from each
+structural family and pass a validation gate. Temperature scaling changes
+probability confidence but preserves class argmax predictions.
+
+### 6.6 Final Evaluation and Persistence
+
+```mermaid
+flowchart TD
+    A[Finalized model] --> B[Predict development]
+    A --> C[Predict held-out test once]
+    B --> D[Fitted training diagnostic]
+    E[Cross-validation history] --> F[Primary validation metric]
+    C --> G[Testing metrics]
+    D --> H[Run summary]
+    F --> H
+    G --> H
+    H --> I[Atomic best_model.joblib]
+    H --> J[Atomic metrics.csv]
+    H --> K[run.json]
+```
+
+Classification reports accuracy, weighted precision, weighted recall,
+weighted F1, and ROC AUC when probabilities permit it. Regression reports
+RMSE, MAE, and R2. A selected ExtraTrees model also exposes its OOB score.
+For an ensemble, the primary CV value is explicitly labeled as the best
+member's CV reference; the separate ensemble gate score is never presented as
+cross-validation.
+
+### 6.7 Implemented Generalization Recommendations
+
+| Recommendation | Production behavior |
+|---|---|
+| 1. Regularize ExtraTrees | Constrains depth/leaves/splits, subsamples rows/features, enables OOB scoring, and exposes a CV HPO grid through `--tune`. |
+| 2. Compare logistic regression | Keeps the regularized linear family in resource-aware classification defaults and preserves its family winner after baseline pruning. |
+| 3. Compare frozen winner | Scores frozen and adapted winner embeddings with the same logistic probe on the same development gate. |
+| 4. Gate LoRA by validation | Uses adaptation only when the accuracy/NLL rule beats or safely matches the frozen selected backbone. |
+| 5. Training-only augmentation | Applies crop, brightness/contrast/color jitter, and random erasing only inside LoRA training; flips are disabled for directional class labels. |
+| 6. Group images by source | Infers conservative subject/video/frame groups and keeps them disjoint through splitting, CV, HPO, and gates. |
+| 7. Make CV primary | Selects and reports fold mean as primary; fitted training accuracy, OOB, gate, and held-out test values are separate diagnostics. |
+
+## 7. Reporting Workflow
+
+```mermaid
+flowchart TD
+    A[Final results] --> B{report enabled?}
+    B -->|yes| C[EDA plots and summary]
+    B -->|yes| D[Permutation importance]
+    D --> E{SHAP enabled and installed?}
+    E -->|yes| F[SHAP plots]
+    C --> G[Self-contained HTML report]
+    D --> G
+    F --> G
+    A --> H{LLM enabled?}
+    H -->|yes| I[LiteLLM request]
+    I -->|success| J[LLM explanation.md]
+    I -->|failure| K[Deterministic offline explanation.md]
+    A --> L{notebook enabled?}
+    L -->|yes| M[Standalone analysis.ipynb]
+```
+
+Report failures are isolated and logged so a plotting or LLM problem does not
+discard a successfully trained model. The Markdown file is still produced
+without network access because the LLM path has an offline fallback.
+
+### 7.1 Runtime Timing Workflow
+
+```mermaid
+flowchart LR
+    A[Input preparation] --> B[Backbone tournament]
+    B --> C[LoRA training, optional]
+    C --> D[Representation gate and test embedding]
+    D --> E[Downstream AutoML]
+    E --> F[Plots and HTML]
+    F --> G[LLM or offline Markdown]
+    G --> H[Notebook]
+    H --> I[Total pipeline time]
+```
+
+The nested LoRA and embedding values explain the image portion of input
+preparation; they are not added to it a second time. Total runtime includes
+every stage plus lightweight orchestration and persistence, while downstream
+training time includes only baseline screening, CV/HPO, generalization,
+calibration, final evaluation, and model persistence.
+
+## 8. Key Architectural Ideas
+
+| Idea | Why it matters |
+|---|---|
+| One public CLI | Users test any supported dataset without editing source. |
+| Immutable run configuration | Every runtime choice can be serialized into the manifest. |
+| Modality adapter, shared AutoML core | Images become numeric DataFrames, then reuse the tabular model path. |
+| Test-set firewall | Selection and calibration happen before the test set is evaluated. |
+| Conservative group isolation | Repeated subject/video frames stay together; uncertain grouping falls back safely. |
+| Staged backbone tournament | Full embeddings are limited to finalists rather than every registered model. |
+| Representation acceptance gate | LoRA must beat the frozen winning backbone on unseen development data before it can reach test. |
+| Cheap-to-expensive search | A bounded baseline screen avoids full CV for clearly weak models. |
+| CV-first diagnostics | Fold performance drives selection; fitted accuracy is only an overfitting signal. |
+| Structural diversity gate | An ensemble is considered only across GBDT, linear, and nonlinear families. |
+| Calibration after selection | Temperature scaling improves probability NLL without changing class predictions. |
+| Fold-local transformations | Imputation, encoding, scaling, and target statistics avoid validation leakage. |
+| Lazy heavy dependencies | Boosters, Torch, Transformers, PEFT, SHAP, and LiteLLM load only when needed. |
+| Content-aware caching | Embeddings require matching model, adapter, files, labels, and cache schema. |
+| Graceful optional failures | Missing optional packages reduce capabilities instead of breaking core tabular runs. |
+| Artifact-first observability | Metrics, configuration, timing, memory, and report paths are persisted. |
+
+## 9. Production Source Files
+
+These are the modules explicitly included in the wheel by `pyproject.toml`.
+
+| File | Responsibility |
+|---|---|
+| `main.py` | CLI parser, prompting, image representation gate, tabular/image orchestration, test firewall, stage timing, artifacts, and terminal summary. |
+| `config.py` | Loads optional dotenv values and reads `LLM_MODEL` without embedding an invalid provider default. |
+| `data_loader.py` | Reads tabular files, validates targets, infers task type, encodes labels, performs stratified splitting, and drops development-inferred ID columns. |
+| `data_cleaner.py` | Removes duplicates, handles missing feature values conservatively, and preserves X/y alignment. |
+| `resource_manager.py` | Categorizes dataset size and emits model, encoding, CV-related, and feature-interaction directives. |
+| `feature_processing.py` | Builds numeric/categorical preprocessing pipelines, hashing, scaling, imputation, and dense-embedding bypass behavior. |
+| `feature_engineering.py` | Learns optional interactions, ratios, transformations, outlier caps, regularized OOF target encoding, and transformation logs. |
+| `model_trainer.py` | Defines regularized model catalogues, lazy boosters, stratified/grouped screening and CV, early stopping, preprocessing caching, and full-data refits. |
+| `model_selector.py` | Final held-out metrics, grouped validation-ranked HPO including ExtraTrees regularization, and atomic persistence. |
+| `generalization.py` | Probability alignment, grouped diverse-ensemble gate, scalar temperature optimization, calibrated wrapper, and distinct gate/CV metrics. |
+| `dataset_embedding.py` | Computes statistical and landmark search embeddings and provides versioned serialization helpers. |
+| `vision_backbones.py` | Declares CLIP, DINOv2, ResNet, and SigLIP capabilities and performs pre-load RAM/VRAM/device filtering. |
+| `backbone_selector.py` | Runs nested successive-halving frozen probes, multi-objective ranking, tie policy, time budgeting, failure isolation, and CLIP fallback. |
+| `image_splitting.py` | Conservatively infers subject/video/frame groups and performs stratified group splits with safe fallback. |
+| `multimodal_extractor.py` | Discovers images, augments training rows, extracts generic transformer/CNN features, loads PEFT adapters, and manages timed FP16 caches. |
+| `lora_config.py` | Provides backward-compatible default LoRA settings from the production vision registry. |
+| `lora_adapter_trainer.py` | Performs winner-specific group-aware transformer LoRA with augmentation, AdamW, clipping/checkpointing, early stopping, and metadata. |
+| `eda.py` | Produces dataset summaries, target distributions, feature distributions, and correlation plots using a non-interactive backend. |
+| `explainer.py` | Produces permutation importance and optional SHAP explanations for fitted pipelines. |
+| `report_generator.py` | Combines metrics, EDA, explanations, and feature-engineering logs into HTML. |
+| `llm_explainer.py` | Requests a constrained LiteLLM report and writes a deterministic Markdown fallback on any failure. |
+| `notebook_generator.py` | Writes a standalone analysis notebook containing run context and reproducible artifact inspection cells. |
+
+## 10. Important Project and Test Files
+
+| File | Meaning |
+|---|---|
+| `pyproject.toml` | Canonical package metadata, base/optional dependencies, console entrypoint, explicit wheel module list, and pytest settings. |
+| `uv.lock` | Exact reproducible dependency resolution for base and optional extras. |
+| `README.md` | Installation, CLI usage, supported layouts, outputs, and safety guarantees. |
+| `understanding.md` | This architecture and operational reference. |
+| `.python-version` | Pins the local Python line to 3.12. |
+| `.env.example` | Safe template for LiteLLM model/provider configuration; it contains no real secret. |
+| `.gitignore` | Excludes datasets, secrets, environments, caches, builds, models, and run artifacts. |
+| `tests/test_data_loader.py` | Verifies split preservation, development-only ID filtering, and retention of legitimate predictive features. |
+| `tests/test_cli_calibration.py` | Verifies no-argument CLI parsing and that temperature scaling preserves predicted classes and normalized probabilities. |
+| `tests/test_image_splitting.py` | Verifies group isolation/CV, nested tournament samples, automatic backbone selection, CLIP fallback, LoRA probing, and ExtraTrees defaults without model downloads. |
+
+## 11. Runtime Artifacts and Their Meaning
+
+| Artifact | Meaning |
+|---|---|
+| `best_model.joblib` | Deployable fitted preprocessing/model object. Treat it as untrusted executable data if received from another source. |
+| `metrics.csv` | Final held-out metrics for the selected deployment model. |
+| `run.json` | Run configuration, every backbone stage/score/failure, selected representation, grouping, primary/gate/test metrics, timings, RAM/VRAM, calibration, and ensemble metadata. |
+| `search_profile.json` | Versioned statistical and landmark vector; it is not itself a trained model or an active FAISS lookup. |
+| `report/report.html` | Human-readable combined report with embedded plots. |
+| `report/explanation.md` | LLM-generated or deterministic offline model explanation. |
+| `report/analysis.ipynb` | Standalone notebook for inspecting run outputs. |
+| `report/eda/*.png` | Target, feature, and correlation diagnostics. |
+| `report/explanations/*.png` | Permutation importance and optional SHAP diagnostics. |
+| `.cache/preprocessing/` | Joblib cache of fold-specific fitted transformations. |
+| `.cache/embeddings/*.npz` | Exact split/model/adapter-aware image embeddings stored as FP16. |
+| `lora_adapter/<backbone-key>/` | Best candidate winner adapter and training metadata; `run.json` says whether the outer gate accepted it. |
+| `dist/*.whl` | Installable production wheel containing only declared production modules. |
+| `dist/*.tar.gz` | Source distribution generated by `uv build`. |
+
+Artifacts are generated outputs and should not be committed. The ignore policy
+now enforces this for future runs.
+
+## 12. Non-Production Files Still Present in the Worktree
+
+The following files are disconnected from `main.py`, excluded from the wheel,
+and are deletion candidates. They remain only because this environment
+requires explicit approval for deleting the exact tracked set.
+
+### Agent Prototype
+
+| File | Historical purpose |
+|---|---|
+| `agents/agent_orchestrator.py` | Chained data, business, feature, model, and critic agents. |
+| `agents/data_agent.py` | LLM data profiling and notebook request. |
+| `agents/business_agent.py` | LLM business-context inference. |
+| `agents/feature_agent.py` | LLM feature suggestions. |
+| `agents/model_agent.py` | LLM model recommendations. |
+| `agents/critic_agent.py` | LLM critique stage. |
+| `agents/notebook_generator.py` | Older agent-specific notebook writer. |
+| `test_agentic_pipeline.py` | Manual script for the removed agent workflow. |
+
+### FAISS and Meta-Learning Prototype
+
+| File | Historical purpose |
+|---|---|
+| `cold_start.py` | FAISS nearest-dataset routing and cold-start decisions. |
+| `unified_memory.py` | Combined ML/DL memory abstraction. |
+| `build_memory.py` | OpenML-driven memory construction. |
+| `preseed_memory.py` | Synthetic/predefined memory population. |
+| `update_memory_hparams.py` | Memory record hyperparameter update utility. |
+| `delete_memory.py` | Memory deletion utility. |
+| `extract_memory.py` | Source extraction/migration helper. |
+| `task_encoder.py` | Siamese dataset task encoder training. |
+| `dataset_profiler.py` | Older OpenML dataset profile script. |
+| `heuristics.py` | Historical cold-start model heuristics. |
+| `routing_engine.py` | Experimental routing score logic. |
+| `paradigm_router.py` | LLM ML-vs-DL routing experiment. |
+| `onboarding_agent.py` | Interactive onboarding configuration experiment. |
+| `memory_store.faiss` | Historical serialized FAISS index. |
+| `memory_store.pkl` | Historical metadata sidecar, ignored but still local. |
+| `task_encoder.pt` | Historical task encoder checkpoint. |
+| `test_cold_start.py` | Manual tests for the old cold-start system. |
+| `test_embedding.py` | Manual tests for the old dataset embedding API. |
+| `test_unified_memory.py` | Manual tests for the old unified memory system. |
+
+### Multimodal Memory Prototype
+
+| File | Historical purpose |
+|---|---|
+| `build_multimodal_faiss_hf.py` | Built image/video memories from Hugging Face datasets. |
+| `dl_faiss_memory.py` | Modality-specific FAISS storage. |
+| `domain_registry.py` | Broader experimental vision model/domain registry. |
+| `dl_memory_vision.faiss` | Historical vision index. |
+| `dl_memory_video.faiss` | Historical video index. |
+| `dl_metadata_vision.json` | Historical vision index metadata. |
+| `dl_metadata_video.json` | Historical video index metadata. |
+
+### NAS, HPO, W&B, and Ensemble Prototype
+
+| File | Historical purpose |
+|---|---|
+| `auto_dl_nas.py` | Standalone Torch/Optuna neural architecture experiment. |
+| `hpo_optuna.py` | Older Optuna/W&B HPO implementation. |
+| `multi_objective.py` | Experimental accuracy/time/complexity utility. |
+| `weight_search.py` | Multi-objective weight sweep/report script. |
+| `confidence_calibration.py` | Standalone confidence plotting with import-time W&B behavior. |
+| `shap_explainer.py` | Older W&B-coupled SHAP script. |
+| `llm_suggester.py` | Older LLM hyperparameter suggestion path. |
+| `wandb_logger.py` | Global W&B logging wrapper. |
+| `metaautoml/data/gpu_tabular_loader.py` | Experimental GPU data loader. |
+| `metaautoml/ensembles/downstream_bagging.py` | Experimental downstream bagging. |
+| `metaautoml/ensembles/embedding_cache.py` | PyArrow/Torch embedding cache experiment. |
+| `metaautoml/ensembles/oof_stacking.py` | Experimental OOF stacker. |
+| `metaautoml/evaluation/calibration_shap.py` | W&B calibration/SHAP experiment. |
+| `metaautoml/nas/downstream_nas.py` | Optuna downstream NAS experiment. |
+| `metaautoml/nas/regularized_objective.py` | Regularized booster/MLP objective. |
+| `metaautoml/pipelines/autodl_router.py` | Experimental AutoDL route. |
+| `metaautoml/pipelines/automl_router.py` | Experimental tabular router. |
+| `metaautoml/pipelines/stacking_integration.py` | Experimental diverse stacking integration. |
+
+### Redundant or Unsafe Repository Artifacts
+
+| File/path | Why it should not be source |
+|---|---|
+| `requirements.txt` | Duplicates and conflicts with canonical `pyproject.toml`/`uv.lock`. |
+| `.gitconfig` | Machine/user-specific Git configuration and personal identity data. |
+| `artifacts/` | Historical fitted model and run output. |
+| `embedding_cache/` | Historical generated embeddings. |
+| `lora_adapters/` | Historical adapter with no dataset/version provenance. |
+| `wandb/` | Historical experiment logs and environment metadata. |
+
+## 13. Strengths
+
+- One no-edit CLI supports both tabular and image classification workflows.
+- The final test split is isolated from HPO and model selection.
+- Repeated video/subject groups remain disjoint through test reservation, LoRA
+  gates, downstream CV, HPO, and generalization gating.
+- Model-family diversity is enforced structurally rather than by score alone.
+- Calibration is accepted only when validation NLL does not worsen.
+- Optional heavy libraries are lazy and grouped into install extras.
+- Backbone choice covers vision-language, self-supervised, and CNN families
+  using a reproducible development-only tournament.
+- LoRA is augmented and regularized, then rejected when the frozen winner
+  generalizes as well or better.
+- Logistic regression and regularized ExtraTrees provide linear and nonlinear
+  controls, including an independent OOB diagnostic.
+- Embedding and preprocessing caches reduce repeated compute and memory churn.
+- Model and metrics writes are atomic.
+- Every normal run produces reproducibility and resource metadata.
+- LLM/report failures degrade gracefully instead of losing the trained model.
+- The project builds successfully as both a wheel and source distribution.
+
+## 14. Weaknesses and Remaining Risks
+
+| Risk | Impact | Current mitigation / next step |
+|---|---|---|
+| Legacy files remain in the Git worktree | Confuses maintainers and expands attack/dependency surface | Excluded from wheel; delete exact approved set. |
+| `.gitconfig` contains personal identity | Privacy and machine-specific configuration risk | Remove it from version control after explicit approval. |
+| `--max-time` is cooperative | A single estimator fit can exceed the budget | Documented; hard isolation would require subprocess workers. |
+| Image models download on first use | Offline image runs fail without a local model cache | Actionable dependency/runtime error; pre-provision models in deployment. |
+| Backbone probes are approximate | A 10% or 30% ranking can eliminate a late-improving candidate | Nested stages retain three then two candidates; force an explicit list or one key when domain knowledge is stronger. |
+| First automatic image run downloads multiple models | Startup time and disk use can be substantial | Resource filtering, successive halving, exact caches, a separate time budget, and `--backbones clip` limit the cost. |
+| Upstream model metadata can change | Weights, processors, or licensing can change outside this repository | Pin deployment cache/revisions and review upstream model cards before commercial deployment. |
+| LoRA defaults are fixed | May be suboptimal across domains and dataset sizes | Early stopping and weight decay reduce risk; expose advanced options only with evidence. |
+| Automatic grouping is heuristic | Unusual filenames/layouts can hide real subjects or videos | Conservative patterns avoid false groups; use explicit train/val/test folders when provenance is known. |
+| Calibration uses one internal split | Small datasets can produce noisy temperature estimates | Skip when data is insufficient; accept only non-worsening NLL. |
+| RAM peak is platform-dependent | Some platforms expose only current RSS | Manifest labels both current and peak; use container telemetry in production. |
+| VRAM metrics require CUDA Torch | CPU systems report N/A/zero | Expected and surfaced explicitly. |
+| No active FAISS retrieval/anti-memory | Search embedding is stored but does not transfer prior runs | Add only after a versioned, tested memory schema and measurable benchmark gain. |
+| No image end-to-end CI fixture | Model downloads are too large for fast unit tests | Cache logic is isolated; add a mocked processor/model integration test. |
+| Joblib model loading executes Python objects | Untrusted model files are unsafe | Load only artifacts produced by trusted runs. |
+| XLS parsing adds an old-format dependency | Extra base dependency for a legacy format | Drop XLS if only modern XLSX is required. |
+
+## 15. Production Readiness Assessment
+
+The packaged runtime is production-oriented for local/batch AutoML:
+
+- Source compiles successfully.
+- The 14-test production suite passes, including grouped-CV, automatic
+  backbone-selection, and fallback regression tests.
+- The installed CLI help works with no required target argument.
+- A synthetic end-to-end tabular run completes and writes model, metrics, and
+  manifest artifacts with training/validation/testing metrics and RAM/VRAM.
+- `uv build` produces a valid wheel and source distribution.
+- The wheel contains only the production modules listed in Section 9.
+
+Repository cleanup is the remaining operational task. The runtime package is
+already isolated from the historical prototypes, but the repository itself
+will not be clean until the exact legacy/artifact set in Section 12 is deleted.
+
+## 16. Summary
+
+The core design is a leakage-safe, resource-aware funnel:
+
+```mermaid
+flowchart LR
+    Input --> Split --> Screen --> CrossValidate --> Tune
+    Tune --> Generalize --> Calibrate --> FinalTest --> Persist --> Explain
+```
+
+The highest-value architectural property is the test-set firewall. The
+highest-value efficiency properties are successive-halving backbone selection,
+incremental timed FP16 caches, cheap classifier screening, shared fold
+preprocessing, and lazy heavy imports. The highest-value generalization
+controls are group-aware backbone and classifier CV, frozen-versus-adapted
+winner gating, training-only augmentation, regularized ExtraTrees, a linear
+logistic control, validation-gated family diversity, early stopping, LoRA
+weight decay, and non-worsening temperature scaling.
+
+The production wheel is unified and verified. The old experimental stack has
+no runtime role and should be removed from the repository once deletion of the
+exact tracked set is approved.

@@ -78,12 +78,13 @@ class TemperatureScaledClassifier(BaseEstimator, ClassifierMixin):
 class GeneralizationSelection:
     model: Any
     name: str
-    validation_accuracy: float
+    gate_accuracy: float | None
+    primary_cv_accuracy: float
     temperature: float
     ensemble_used: bool
     members: list[str]
-    nll_before: float
-    nll_after: float
+    nll_before: float | None
+    nll_after: float | None
 
 
 def _optimize_temperature(
@@ -120,6 +121,7 @@ def select_generalized_classifier(
     X,
     y,
     random_state: int = 42,
+    groups: np.ndarray | None = None,
 ) -> GeneralizationSelection:
     """Select a single model or diverse ensemble using training-only validation."""
     available = {
@@ -134,14 +136,41 @@ def select_generalized_classifier(
         trained, key=lambda name: validation_scores.get(name, -np.inf)
     )
     selected_names = [name for name in available.values() if name is not None]
+    _, class_counts = np.unique(y, return_counts=True)
+    if class_counts.min() < 2:
+        return GeneralizationSelection(
+            model=trained[best_name],
+            name=best_name,
+            gate_accuracy=None,
+            primary_cv_accuracy=float(validation_scores[best_name]),
+            temperature=1.0,
+            ensemble_used=False,
+            members=[best_name],
+            nll_before=None,
+            nll_after=None,
+        )
 
     indices = np.arange(len(X))
-    fit_idx, val_idx = train_test_split(
-        indices,
-        test_size=0.2,
-        random_state=random_state,
-        stratify=y,
+    validation_count = max(len(np.unique(y)), int(np.ceil(0.2 * len(X))))
+    validation_count = min(
+        validation_count, len(X) - len(np.unique(y))
     )
+    if groups is not None:
+        from image_splitting import split_labeled_indices
+
+        fit_idx, val_idx, _ = split_labeled_indices(
+            y,
+            test_size=validation_count / len(X),
+            random_state=random_state,
+            groups=groups,
+        )
+    else:
+        fit_idx, val_idx = train_test_split(
+            indices,
+            test_size=validation_count,
+            random_state=random_state,
+            stratify=y,
+        )
     X_fit = X.iloc[fit_idx] if hasattr(X, "iloc") else X[fit_idx]
     y_fit = y.iloc[fit_idx] if hasattr(y, "iloc") else y[fit_idx]
     X_val = X.iloc[val_idx] if hasattr(X, "iloc") else X[val_idx]
@@ -195,11 +224,8 @@ def select_generalized_classifier(
     return GeneralizationSelection(
         model=calibrated,
         name=chosen_name,
-        validation_accuracy=float(
-            best_accuracy
-            if ensemble_used
-            else validation_scores.get(best_name, best_accuracy)
-        ),
+        gate_accuracy=float(best_accuracy),
+        primary_cv_accuracy=float(validation_scores[best_name]),
         temperature=temperature,
         ensemble_used=ensemble_used,
         members=selected_names if ensemble_used else [best_name],

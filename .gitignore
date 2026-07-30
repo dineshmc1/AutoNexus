@@ -1,22 +1,39 @@
-online_casino.csv
-*.csv
-*.xlsx
+# Local environments and Python caches
+.venv/
+venv/
 __pycache__/
+*.py[cod]
+.pytest_cache/
+.uv-cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Secrets and local configuration
+.env
+
+# Input data
+*.csv
+*.xls
+*.xlsx
+
+# Runtime outputs and caches
+artifacts/
+embedding_cache/
+lora_adapters/
 models/
 reports/
-venv/
-spotify.csv
-Student_Performance.csv.xlsx
-property_data.csv
-online_casino.csv
-*.csv
-*.pkl
-*.xlsx
+shap_plots/
+temp_hf_datasets/
+wandb/
+*.log
 *.html
 *.png
-.env
-*.log
-wandb/
+*.pkl
+
+# Local tooling
 .understand-anything/
 .tmp-dashboard/
 config.json

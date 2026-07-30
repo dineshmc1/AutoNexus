@@ -1,549 +1,400 @@
-import os
-import glob
-import numpy as np
-import pandas as pd
-from tqdm import tqdm
-from sklearn.decomposition import PCA
-import warnings
-from dotenv import load_dotenv
+"""Deterministic, cached vision embeddings for class-folder datasets."""
 
-load_dotenv() # Load .env file if it exists
-
-# Optional: If the user provides a token, use it. If not, ignore the warning and use anonymous.
-hf_token = os.getenv("HF_TOKEN")
-if hf_token:
-    from huggingface_hub import login
-    login(token=hf_token)
-import logging
-logging.getLogger("transformers").setLevel(logging.ERROR)
-logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
-
-# Suppress annoying warnings
-warnings.filterwarnings('ignore')
-
+from __future__ import annotations
 
 import hashlib
-from torch.utils.data import Dataset, DataLoader
-from PIL import Image
-import librosa
-from concurrent.futures import ProcessPoolExecutor
-import multiprocessing as mp
-import cv2
+import gc
+import random
+import time
+from pathlib import Path
+from typing import Callable, Sequence
+
+import numpy as np
+import pandas as pd
+import torch
+from PIL import Image, ImageDraw, ImageEnhance, ImageOps
+from torch.utils.data import DataLoader, Dataset
+from tqdm import tqdm
+
+from vision_backbones import DEFAULT_BACKBONE_KEY, VISION_BACKBONES
+
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+CACHE_VERSION = "vision-v3-multibackbone-normalized"
+DEFAULT_VISION_MODEL_ID = VISION_BACKBONES[DEFAULT_BACKBONE_KEY].model_id
 
 
-MODALITY_EXTENSIONS = {
-    "vision": {".jpg", ".jpeg", ".png", ".bmp", ".webp"},
-    "text": {".txt", ".md"},
-    "audio": {".wav", ".mp3", ".flac", ".ogg"},
-    "video": {".mp4", ".avi", ".mov", ".mkv"},
-}
+class TrainImageAugmentation:
+    """Lightweight train-only augmentation without a torchvision dependency."""
+
+    def __init__(
+        self,
+        crop_scale: tuple[float, float] = (0.8, 1.0),
+        horizontal_flip_probability: float = 0.5,
+        erase_probability: float = 0.15,
+    ):
+        self.crop_scale = crop_scale
+        self.horizontal_flip_probability = horizontal_flip_probability
+        self.erase_probability = erase_probability
+
+    def __call__(self, image: Image.Image) -> Image.Image:
+        width, height = image.size
+        scale = random.uniform(*self.crop_scale)
+        crop_width = max(1, int(width * scale))
+        crop_height = max(1, int(height * scale))
+        left = random.randint(0, max(0, width - crop_width))
+        top = random.randint(0, max(0, height - crop_height))
+        image = image.crop(
+            (left, top, left + crop_width, top + crop_height)
+        )
+        if random.random() < self.horizontal_flip_probability:
+            image = ImageOps.mirror(image)
+
+        image = ImageEnhance.Brightness(image).enhance(
+            random.uniform(0.85, 1.15)
+        )
+        image = ImageEnhance.Contrast(image).enhance(
+            random.uniform(0.85, 1.15)
+        )
+        image = ImageEnhance.Color(image).enhance(
+            random.uniform(0.9, 1.1)
+        )
+        if random.random() < self.erase_probability:
+            draw = ImageDraw.Draw(image)
+            erase_width = max(1, int(image.width * random.uniform(0.05, 0.15)))
+            erase_height = max(
+                1, int(image.height * random.uniform(0.05, 0.15))
+            )
+            erase_left = random.randint(
+                0, max(0, image.width - erase_width)
+            )
+            erase_top = random.randint(
+                0, max(0, image.height - erase_height)
+            )
+            draw.rectangle(
+                (
+                    erase_left,
+                    erase_top,
+                    erase_left + erase_width,
+                    erase_top + erase_height,
+                ),
+                fill=(127, 127, 127),
+            )
+        return image
 
 
-def discover_labeled_files(data_path, modality="vision"):
-    """Return media paths and class labels inferred from parent folders."""
-    data_path = os.path.abspath(data_path)
-    extensions = MODALITY_EXTENSIONS[modality]
-    files = []
-    labels = []
-    for root, _, filenames in os.walk(data_path):
-        if os.path.abspath(root) == data_path:
+def discover_labeled_files(
+    data_path: str, modality: str = "vision"
+) -> tuple[list[str], list[str]]:
+    """Return sorted image paths and labels inferred from parent folders."""
+    if modality != "vision":
+        raise ValueError("The production CLI currently supports vision only.")
+    root = Path(data_path)
+    if not root.is_dir():
+        raise ValueError(f"Image directory not found: {root}")
+
+    records: list[tuple[str, str]] = []
+    for path in root.rglob("*"):
+        if not path.is_file() or path.suffix.lower() not in IMAGE_EXTENSIONS:
             continue
-        label = os.path.basename(root)
-        if label.lower() == "images":
-            label = os.path.basename(os.path.dirname(root))
-        for filename in sorted(filenames):
-            path = os.path.join(root, filename)
-            if os.path.splitext(filename)[1].lower() in extensions:
-                files.append(path)
-                labels.append(label)
-    return files, labels
+        relative = path.relative_to(root)
+        if len(relative.parts) < 2:
+            continue
+        # The first directory under the supplied split/root is the class.
+        records.append((str(path.resolve()), relative.parts[0]))
+    records.sort(key=lambda item: item[0].casefold())
+    if not records:
+        raise ValueError(
+            f"No labeled images found under {root}. Put images inside "
+            "class-named subfolders."
+        )
+    files, labels = zip(*records)
+    return list(files), list(labels)
 
 
 class MultiModalDataset(Dataset):
-    def __init__(self, file_paths, labels, modality='vision'):
-        self.file_paths = file_paths
-        self.labels = labels
-        self.modality = modality
+    """Lazy image decoder retained as the shared LoRA/embedder dataset."""
 
-    def __len__(self):
-        return len(self.file_paths)
+    def __init__(
+        self,
+        files: Sequence[str],
+        labels: Sequence[str],
+        modality: str = "vision",
+        transform: Callable[[Image.Image], Image.Image] | None = None,
+    ):
+        if modality != "vision":
+            raise ValueError("Only vision datasets are supported.")
+        if len(files) != len(labels):
+            raise ValueError("Image paths and labels must have equal length.")
+        self.files = list(files)
+        self.labels = list(labels)
+        self.transform = transform
 
-    def __getitem__(self, idx):
-        path = self.file_paths[idx]
-        label = self.labels[idx]
-        
-        if self.modality == 'vision':
-            try:
-                img = Image.open(path).convert('RGB')
-                if img.size[0] < 32 or img.size[1] < 32:
-                    img = img.resize((224, 224))
-            except Exception as e:
-                # Silently filter out to avoid breaking tqdm progress bars
-                return None, label
-            return img, label
-        elif self.modality == 'audio':
-            try:
-                y, sr = librosa.load(path, sr=16000, duration=5.0)
-                if len(y) < 1600:
-                    raise ValueError("Audio too short")
-                return y, label
-            except Exception as e:
-                # Silently filter out to avoid breaking tqdm progress bars
-                return None, label
-        elif self.modality == 'video':
-            frames = []
-            try:
-                cap = cv2.VideoCapture(path)
-                fps = cap.get(cv2.CAP_PROP_FPS)
-                if fps <= 0: fps = 24
-                frame_count = 0
-                success, frame = cap.read()
-                while success:
-                    if frame_count % int(fps) == 0:
-                        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                        frames.append(Image.fromarray(frame_rgb))
-                        if len(frames) >= 10: break
-                    success, frame = cap.read()
-                    frame_count += 1
-                cap.release()
-            except Exception as e:
-                pass
-            if not frames:
-                return None, label
-            return frames, label
-        elif self.modality == 'text':
-            try:
-                with open(path, 'r', encoding='utf-8', errors='ignore') as f:
-                    text = f.read()[:5000]
-            except Exception as e:
-                # Silently filter out to avoid breaking tqdm progress bars
-                return None, label
-            return text, label
+    def __len__(self) -> int:
+        return len(self.files)
+
+    def __getitem__(self, index: int):
+        try:
+            with Image.open(self.files[index]) as image:
+                decoded = image.convert("RGB").copy()
+                if self.transform is not None:
+                    decoded = self.transform(decoded)
+                return decoded, self.labels[index]
+        except (OSError, ValueError):
+            return None, self.labels[index]
+
 
 def multimodal_collate(batch):
-    data = [item[0] for item in batch if item[0] is not None]
-    labels = [item[1] for item in batch if item[0] is not None]
-    
-    if not data:
+    """Drop unreadable images without losing label alignment."""
+    valid = [(data, label) for data, label in batch if data is not None]
+    if not valid:
         return [], []
-    return data, labels
+    images, labels = zip(*valid)
+    return list(images), list(labels)
 
-# Process single file for CPU Parallelization
-def _process_single_file(args):
-    path, modality, domain = args
-    # This is a stub for CPU parallelization as requested.
-    # We would need to load the model inside the worker, but for simplicity we return dummy or call extractor.
-    # In a full implementation, models are loaded lazily here.
-    return None
+
+def extract_vision_features(model, processor, images, device):
+    """Return one feature tensor for CLIP, ViT-style, or CNN backbones."""
+    inputs = processor(images=images, return_tensors="pt")
+    if hasattr(inputs, "to"):
+        inputs = inputs.to(device)
+    else:
+        inputs = {
+            key: value.to(device) if hasattr(value, "to") else value
+            for key, value in inputs.items()
+        }
+
+    feature_model = model
+    if not hasattr(feature_model, "get_image_features"):
+        base_model = getattr(model, "base_model", None)
+        wrapped_model = getattr(base_model, "model", None)
+        if hasattr(wrapped_model, "get_image_features"):
+            feature_model = wrapped_model
+
+    if hasattr(feature_model, "get_image_features"):
+        features = feature_model.get_image_features(**inputs)
+    else:
+        outputs = model(**inputs)
+        image_embeds = getattr(outputs, "image_embeds", None)
+        pooler_output = getattr(outputs, "pooler_output", None)
+        last_hidden_state = getattr(outputs, "last_hidden_state", None)
+        if image_embeds is not None:
+            features = image_embeds
+        elif pooler_output is not None:
+            features = pooler_output
+        elif last_hidden_state is not None:
+            features = last_hidden_state[:, 0]
+        else:
+            raise RuntimeError(
+                "Backbone output has no supported image feature tensor."
+            )
+    return features.flatten(start_dim=1) if features.ndim > 2 else features
+
 
 class UniversalEmbedder:
+    """Lazy generic vision embedder with exact, adapter-aware disk caching."""
 
-    def __init__(self, device='cpu', batch_size=32, domain='general', max_files_per_class=None, modality='vision', adapter_path=None):
-        self.device = device
+    def __init__(
+        self,
+        device: torch.device | str = "cpu",
+        batch_size: int = 32,
+        domain: str = "general",
+        max_files_per_class: int | None = None,
+        modality: str = "vision",
+        adapter_path: str | None = None,
+        cache_dir: str = "embedding_cache",
+        model_id: str = DEFAULT_VISION_MODEL_ID,
+        model_revision: str = "main",
+    ):
+        if modality != "vision":
+            raise ValueError("The production CLI currently supports vision only.")
+        if domain != "general":
+            raise ValueError("The production CLI currently supports domain='general'.")
+        self.device = torch.device(device)
         self.batch_size = batch_size
         self.domain = domain
-        self.modality = modality
         self.max_files_per_class = max_files_per_class
-        
-        # Lazy loading of models to save memory
+        self.modality = modality
+        self.cache_dir = Path(cache_dir)
+        self.model_id = model_id
+        self.model_revision = model_revision
+        self.resolved_model_revision: str | None = None
+        self.adapter_path = (
+            str(Path(adapter_path).resolve()) if adapter_path else None
+        )
+        if self.adapter_path and not Path(self.adapter_path).is_dir():
+            raise ValueError(f"LoRA adapter not found: {self.adapter_path}")
         self.vision_model = None
         self.vision_processor = None
-        self.text_model = None
-        
-        #  UNIVERSAL ADAPTER LOADING 
-        adapter_name = f"{modality}_{domain}_lora"
-        adapter_path = adapter_path or f"lora_adapters/{adapter_name}"
-        self.adapter_path = os.path.abspath(adapter_path) if os.path.exists(adapter_path) else None
-        
-        if os.path.exists(adapter_path):
-            print(f"🔧 Loading {adapter_name} adapter...")
-            self._load_adapter(adapter_path)
-        else:
-            print(f"⚠️ No adapter found for {adapter_name}. Using frozen base model.")
+        self.last_cache_hit = False
+        self.last_embedding_seconds = 0.0
 
-    def _load_adapter(self, adapter_path):
-        from peft import PeftModel
-        if self.modality == 'vision':
-            if self.vision_model is None:
-                from transformers import AutoProcessor, AutoModel
-                from domain_registry import get_vision_model_config
-                cfg = get_vision_model_config(self.domain, "clip")
-                if "imageomics" in cfg.get("model_id", ""):
-                    import open_clip
-                    model, _, preprocess = open_clip.create_model_and_transforms('hf-hub:' + cfg["model_id"])
-                    self.vision_model = model.to(self.device)
-                    self.vision_processor = preprocess
-                else:
-                    self.vision_processor = AutoProcessor.from_pretrained(cfg["model_id"])
-                    self.vision_model = AutoModel.from_pretrained(cfg["model_id"]).to(self.device)
-            
-            self.vision_model = PeftModel.from_pretrained(
-                self.vision_model, adapter_path, is_trainable=False
-            ).merge_and_unload()
-            
-        elif self.modality == 'audio':
-            if getattr(self, '_ast_model', None) is None:
-                from transformers import AutoFeatureExtractor, ASTForAudioClassification
-                self._ast_model = ASTForAudioClassification.from_pretrained("MIT/ast-finetuned-audioset-10-10-0.4593").to(self.device)
-                self._ast_extractor = AutoFeatureExtractor.from_pretrained("MIT/ast-finetuned-audioset-10-10-0.4593")
-            
-            self._ast_model = PeftModel.from_pretrained(
-                self._ast_model, adapter_path, is_trainable=False
-            ).merge_and_unload()
-            
-        elif self.modality == 'text':
-            if self.text_model is None:
-                from sentence_transformers import SentenceTransformer
-                self.text_model = SentenceTransformer("all-MiniLM-L6-v2", device=self.device)
-            
-            self.text_model[0].auto_model = PeftModel.from_pretrained(
-                self.text_model[0].auto_model, adapter_path, is_trainable=False
-            ).merge_and_unload()
-        
-    
-    def _extract_fast(self, files, labels, modality):
-        import torch
-        dataset = MultiModalDataset(files, labels, modality=modality)
-        
-        # 🚀 MULTIPROCESSING DATALOADER 🚀
-        loader = DataLoader(
-            dataset, 
-            batch_size=self.batch_size, 
-            num_workers=0 if os.name == 'nt' else 4, # Windows needs 0 inside notebooks/scripts without __main__ block guard, but we'll try 0 to be safe
-            pin_memory=(self.device.type == 'cuda'),
-            collate_fn=multimodal_collate
+    def release(self) -> None:
+        """Release backbone objects before another representation is loaded."""
+        self.vision_model = None
+        self.vision_processor = None
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    def _load_model(self) -> None:
+        if self.vision_model is not None:
+            return
+        from transformers import AutoModel, AutoProcessor
+
+        revision = self._resolve_model_revision()
+        self.vision_processor = AutoProcessor.from_pretrained(
+            self.model_id, revision=revision
         )
-        
-        all_embeddings = []
-        all_labels = []
-        
-        # Ensure model is loaded
-        if modality == 'vision' and self.vision_model is None:
-            from transformers import AutoProcessor, AutoModel
-            from domain_registry import get_vision_model_config
-            cfg = get_vision_model_config(self.domain, "clip")
-            
-            if "imageomics" in cfg.get("model_id", ""):
-                import open_clip
-                model, _, preprocess = open_clip.create_model_and_transforms('hf-hub:' + cfg["model_id"])
-                self.vision_model = model.to(self.device)
-                self.vision_processor = preprocess
-                self.vision_model.eval()
-            else:
-                self.vision_processor = AutoProcessor.from_pretrained(cfg["model_id"])
-                self.vision_model = AutoModel.from_pretrained(cfg["model_id"]).to(self.device)
-                self.vision_model.eval()
-        elif modality == 'audio' and not hasattr(self, "_ast_extractor"):
-            from transformers import AutoFeatureExtractor, ASTForAudioClassification
-            self._ast_model = ASTForAudioClassification.from_pretrained("MIT/ast-finetuned-audioset-10-10-0.4593").to(self.device)
-            self._ast_extractor = AutoFeatureExtractor.from_pretrained("MIT/ast-finetuned-audioset-10-10-0.4593")
-            self._ast_model.eval()
-        elif modality == 'video' and self.vision_model is None:
-            from transformers import CLIPProcessor, CLIPModel
-            self.vision_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
-            self.vision_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").to(self.device)
-            self.vision_model.eval()
-        elif modality == 'text' and self.text_model is None:
-            from sentence_transformers import SentenceTransformer
-            self.text_model = SentenceTransformer("all-MiniLM-L6-v2", device=self.device)
-
-        if modality == 'vision':
-            from domain_registry import get_vision_model_config
-            cfg_vision = get_vision_model_config(self.domain, "clip")
-            
-        with torch.no_grad():
-            for batch_data, batch_labels in tqdm(loader, desc=f"Fast Extracting {modality}"):
-                
-                # 🚨 SAFETY CHECK: Skip empty batches 🚨
-                if not batch_data or len(batch_data) == 0:
-                    continue
-                    
-                if modality == 'vision':
-                    
-                    if "imageomics" in cfg_vision.get("model_id", ""):
-                        import torch
-                        inputs = torch.stack([self.vision_processor(img) for img in batch_data]).to(self.device)
-                        with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=(self.device.type=='cuda')):
-                            outputs = self.vision_model.encode_image(inputs)
-                        all_embeddings.append(outputs.float().cpu().numpy())
-                        all_labels.extend(batch_labels)
-                    else:
-                        inputs = self.vision_processor(images=batch_data, return_tensors="pt")
-                        if hasattr(self.vision_processor, 'pad'):
-                            inputs = self.vision_processor.pad(inputs, return_tensors="pt")
-                        # 🚀 MOVE TO GPU & ENABLE FP16 🚀
-                        inputs = {k: v.to(self.device) for k, v in inputs.items()}
-                        
-                        with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=(self.device.type=='cuda')):
-                            if hasattr(self.vision_model, 'get_image_features'):
-                                outputs = self.vision_model.get_image_features(**inputs)
-                            else:
-                                outputs = self.vision_model(**inputs)
-                                if hasattr(outputs, 'pooler_output') and outputs.pooler_output is not None:
-                                    outputs = outputs.pooler_output
-                                elif hasattr(outputs, 'last_hidden_state'):
-                                    outputs = outputs.last_hidden_state.mean(dim=1)
-                                else:
-                                    outputs = outputs[0].mean(dim=1)
-                                    
-                        all_embeddings.append(outputs.float().cpu().numpy()) # Cast back to FP32 for NumPy
-                        all_labels.extend(batch_labels)
-                        
-                elif modality == 'audio':
-                    valid_data, valid_lbls = [], []
-                    for d, l in zip(batch_data, batch_labels):
-                        if d is not None and len(d) > 1600: # Ensure at least 0.1s of audio
-                            valid_data.append(d)
-                            valid_lbls.append(l)
-                            
-                    if not valid_data: 
-                        continue # Skip this batch entirely if all files were bad
-                        
-                    # Process valid audio
-                    inputs = self._ast_extractor(valid_data, sampling_rate=16000, return_tensors="pt", padding=True)
-                    
-                    # Move to device BEFORE autocast
-                    inputs = {k: v.to(self.device) for k, v in inputs.items()}
-                    
-                    with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=(self.device.type=='cuda')):
-                        outputs = self._ast_model(**inputs)
-                        # AST logits are [batch_size, num_classes]. We use them as embeddings for now.
-                        embedding = outputs.logits 
-                        if embedding.ndim == 1: 
-                            embedding = embedding.unsqueeze(0)
-                            
-                    all_embeddings.append(embedding.float().cpu().numpy())
-                    all_labels.extend(valid_lbls)
-                    
-                elif modality == 'video':
-                    # Simplistic video handling for DataLoader
-                    for frames, label in zip(batch_data, batch_labels):
-                        inputs = self.vision_processor(images=frames, return_tensors="pt", padding=True).to(self.device)
-                        with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=(self.device.type=='cuda')):
-                            outputs = self.vision_model.get_image_features(**inputs) if hasattr(self.vision_model, 'get_image_features') else self.vision_model(**inputs)[0].mean(dim=1)
-                            if isinstance(outputs, torch.Tensor): frame_features = outputs
-                            elif hasattr(outputs, 'image_embeds'): frame_features = outputs.image_embeds
-                            elif hasattr(outputs, 'last_hidden_state'): frame_features = outputs.last_hidden_state[:, 0, :]
-                            else: frame_features = outputs[0]
-                        video_embedding = torch.mean(frame_features, dim=0)
-                        all_embeddings.append(video_embedding.float().cpu().numpy())
-                        all_labels.append(label)
-                        
-                elif modality == 'text':
-                    embeddings = self.text_model.encode(batch_data, batch_size=len(batch_data), show_progress_bar=False)
-                    all_embeddings.append(embeddings)
-                    all_labels.extend(batch_labels)
-                    
-        return np.vstack(all_embeddings), all_labels
-
-    def _extract_cpu_parallel(self, files, labels, modality):
-        # Stub for CPU parallelization
-        print(f"🚀 [CPU Mode] Parallelizing extraction across CPU cores...")
-        # Since pickling models is hard, we just fall back to fast extraction with num_workers=0 on CPU
-        return self._extract_fast(files, labels, modality)
-
-    def embed_files(self, files, labels, modality, cache_key=None):
-        """Embed an explicit file subset so train/test isolation is preserved."""
-        if not files:
-            raise ValueError(f"No {modality} files were provided for embedding.")
-        cache_path = None
-        if cache_key:
-            adapter_signature = "frozen-base"
-            if self.adapter_path:
-                adapter_files = [
-                    path
-                    for path in glob.glob(
-                        os.path.join(self.adapter_path, "**", "*"),
-                        recursive=True,
-                    )
-                    if os.path.isfile(path)
-                ]
-                newest_mtime = max(
-                    (os.stat(path).st_mtime_ns for path in adapter_files),
-                    default=0,
-                )
-                total_size = sum(
-                    os.path.getsize(path) for path in adapter_files
-                )
-                adapter_signature = (
-                    f"{self.adapter_path}|{newest_mtime}|{total_size}"
-                )
-            file_signature = "|".join(
-                f"{os.path.abspath(path)}:{os.path.getmtime(path)}"
-                for path in files
-            )
-            identity = (
-                f"{cache_key}|{modality}|{self.domain}|{adapter_signature}|"
-                f"{file_signature}"
-            )
-            digest = hashlib.md5(identity.encode()).hexdigest()
-            os.makedirs("embedding_cache", exist_ok=True)
-            cache_path = os.path.join(
-                "embedding_cache", f"{modality}_{digest}.npz"
-            )
-            if os.path.exists(cache_path):
-                print(f"[Cache] Loading {cache_key} embeddings.")
-                cached = np.load(cache_path, allow_pickle=True)
-                X = pd.DataFrame(
-                    cached["X"],
-                    columns=[
-                        f"feat_{index}"
-                        for index in range(cached["X"].shape[1])
-                    ],
-                )
-                return X, pd.Series(cached["y"])
-
-        if self.device.type == "cpu":
-            X_raw, valid_labels = self._extract_cpu_parallel(
-                files, labels, modality
-            )
-        else:
-            X_raw, valid_labels = self._extract_fast(files, labels, modality)
-        if len(X_raw) == 0:
-            raise ValueError(
-                f"No valid {modality} embeddings could be extracted."
-            )
-
-        X_reduced = X_raw
-        X = pd.DataFrame(
-            X_reduced,
-            columns=[f"feat_{index}" for index in range(X_reduced.shape[1])],
+        model = AutoModel.from_pretrained(
+            self.model_id, revision=revision
         )
-        y = pd.Series(valid_labels)
-        if cache_path:
-            np.savez_compressed(
-                cache_path, X=X_reduced, y=np.asarray(valid_labels)
-            )
-        return X, y
-        
-    def embed_directory(self, data_path, modality):
-        # 1. Generate a unique hash for this dataset folder
-        import hashlib
-        adapter_signature = "frozen-base"
         if self.adapter_path:
-            adapter_files = [
-                path
-                for path in glob.glob(
-                    os.path.join(self.adapter_path, "**", "*"),
-                    recursive=True,
-                )
-                if os.path.isfile(path)
-            ]
-            newest_mtime = max(
-                (os.stat(path).st_mtime_ns for path in adapter_files),
-                default=0,
+            from peft import PeftModel
+
+            print(f"[Embedder] Loading LoRA adapter: {self.adapter_path}")
+            model = PeftModel.from_pretrained(
+                model, self.adapter_path, is_trainable=False
+            ).merge_and_unload()
+        self.vision_model = model.to(self.device)
+        self.vision_model.eval()
+
+    def _resolve_model_revision(self) -> str:
+        """Resolve mutable branch names to a commit for exact cache identity."""
+        if self.resolved_model_revision is None:
+            from transformers import AutoConfig
+
+            config = AutoConfig.from_pretrained(
+                self.model_id, revision=self.model_revision
             )
-            total_size = sum(os.path.getsize(path) for path in adapter_files)
-            adapter_signature = (
-                f"{self.adapter_path}|{newest_mtime}|{total_size}"
+            self.resolved_model_revision = (
+                getattr(config, "_commit_hash", None)
+                or self.model_revision
             )
-        cache_identity = (
-            f"{os.path.abspath(data_path)}|{modality}|{self.domain}|"
-            f"{adapter_signature}"
+        return self.resolved_model_revision
+
+    def _adapter_signature(self) -> str:
+        if not self.adapter_path:
+            return "frozen-base"
+        files = sorted(
+            path for path in Path(self.adapter_path).rglob("*") if path.is_file()
         )
-        folder_hash = hashlib.md5(cache_identity.encode()).hexdigest()
-        cache_dir = "embedding_cache"
-        os.makedirs(cache_dir, exist_ok=True)
-        cache_path = os.path.join(cache_dir, f"{modality}_{folder_hash}.npz")
-        
-        # 2. Check if cache exists
-        if os.path.exists(cache_path):
-            print(f"⚡ [Cache Hit] Loading pre-computed {modality} embeddings from disk...")
-            data = np.load(cache_path, allow_pickle=True)
-            X_df = pd.DataFrame(data['X'], columns=[f"feat_{i}" for i in range(data['X'].shape[1])])
-            y = pd.Series(data['y'])
-            return X_df, y
+        details = [
+            f"{path.relative_to(self.adapter_path)}:{path.stat().st_size}:"
+            f"{path.stat().st_mtime_ns}"
+            for path in files
+        ]
+        return hashlib.sha256("|".join(details).encode()).hexdigest()
 
-        """
-        Scans a directory (assuming subfolders are class labels),
-        extracts embeddings, applies PCA, and returns X (DataFrame) and y (Series).
-        """
-        # --- NEW: AUTO-DETECT TRAIN/TEST SPLITS ---
-        root_dirs = [d for d in os.listdir(data_path) if os.path.isdir(os.path.join(data_path, d))]
-        # If the folder contains standard ML split names, automatically dive into 'train'
-        if set(['train', 'test', 'val']).intersection(set([d.lower() for d in root_dirs])):
-            train_path = os.path.join(data_path, 'train')
-            if os.path.exists(train_path):
-                print(f"[Embedder] Detected Train/Test split structure. Automatically routing to: {train_path}")
-                data_path = train_path
-        # --------------------------------------------
+    def _cache_path(
+        self,
+        files: Sequence[str],
+        labels: Sequence[str],
+        cache_key: str,
+    ) -> Path:
+        signatures = []
+        for filename, label in zip(files, labels):
+            path = Path(filename)
+            stat = path.stat()
+            signatures.append(
+                f"{path.resolve()}:{stat.st_size}:{stat.st_mtime_ns}:{label}"
+            )
+        identity = "|".join(
+            [
+                CACHE_VERSION,
+                cache_key,
+                self.model_id,
+                self._resolve_model_revision(),
+                self._adapter_signature(),
+                *signatures,
+            ]
+        )
+        digest = hashlib.sha256(identity.encode()).hexdigest()
+        return self.cache_dir / f"vision_{digest}.npz"
 
-        print(f"[UniversalEmbedder] Starting extraction for modality: {modality.upper()}")
-        
-        # Find all files and their class labels (subfolder names)
-        files = []
-        labels = []
-        for root, _, filenames in os.walk(data_path):
-            label = os.path.basename(root)
-            if label.lower() == 'images':
-                label = os.path.basename(os.path.dirname(root))
-            
-            if root == data_path:
-                label = 'unknown'  # Files in root dir
-                
-            valid_filenames = []
-            for f in filenames:
-                # Basic filter for valid extensions
-                ext = os.path.splitext(f)[1].lower()
-                if modality == 'vision' and ext not in ['.jpg', '.jpeg', '.png', '.bmp', '.webp']: continue
-                if modality == 'text' and ext not in ['.txt', '.md']: continue
-                if modality == 'audio' and ext not in ['.wav', '.mp3', '.flac', '.ogg']: continue
-                if modality == 'video' and ext not in ['.mp4', '.avi', '.mov', '.mkv']: continue
-                
-                valid_filenames.append(f)
-                
-            for f in valid_filenames:
-                files.append(os.path.join(root, f))
-                labels.append(label)
-                
+    def _extract(self, files: Sequence[str], labels: Sequence[str]):
+        self._load_model()
+        loader = DataLoader(
+            MultiModalDataset(files, labels),
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=0,
+            pin_memory=self.device.type == "cuda",
+            collate_fn=multimodal_collate,
+        )
+        embeddings: list[np.ndarray] = []
+        valid_labels: list[str] = []
+        with torch.inference_mode():
+            for images, batch_labels in tqdm(loader, desc="Extracting images"):
+                if not images:
+                    continue
+                with torch.autocast(
+                    device_type=self.device.type,
+                    dtype=torch.float16,
+                    enabled=self.device.type == "cuda",
+                ):
+                    output = extract_vision_features(
+                        self.vision_model,
+                        self.vision_processor,
+                        images,
+                        self.device,
+                    )
+                if output.ndim > 2:
+                    output = output.flatten(start_dim=1)
+                output = torch.nn.functional.normalize(
+                    output.float(), p=2, dim=1
+                )
+                embeddings.append(output.cpu().numpy())
+                valid_labels.extend(batch_labels)
+        if not embeddings:
+            raise ValueError("No valid images could be decoded and embedded.")
+        return np.vstack(embeddings), valid_labels
+
+    def embed_files(
+        self,
+        files: Sequence[str],
+        labels: Sequence[str],
+        modality: str = "vision",
+        cache_key: str | None = None,
+    ) -> tuple[pd.DataFrame, pd.Series]:
+        """Embed an explicit split without crossing train/test boundaries."""
+        if modality != "vision":
+            raise ValueError("Only vision datasets are supported.")
         if not files:
-            raise ValueError(f"No valid {modality} files found in {data_path}")
-            
-        print(f"[UniversalEmbedder] Found {len(files)} files across {len(set(labels))} classes.")
-        
-        # 3. Fast Extraction using Level 1 & 2 Optimizations
-        if self.device.type == 'cpu':
-            X_raw, valid_labels = self._extract_cpu_parallel(files, labels, modality)
+            raise ValueError("No image files were provided for embedding.")
+        if len(files) != len(labels):
+            raise ValueError("Image paths and labels must have equal length.")
+
+        cache_path = self._cache_path(
+            files, labels, cache_key or "default"
+        )
+        if cache_path.is_file():
+            print(f"[Cache] Loading embeddings from {cache_path}.")
+            with np.load(cache_path, allow_pickle=False) as cached:
+                values = cached["X"].astype(np.float32, copy=False)
+                cached_labels = cached["y"].astype(str).tolist()
+                self.last_embedding_seconds = (
+                    float(cached["embedding_seconds"])
+                    if "embedding_seconds" in cached
+                    else 0.0
+                )
+            self.last_cache_hit = True
         else:
-            X_raw, valid_labels = self._extract_fast(files, labels, modality)
-            
-        if len(X_raw) == 0:
-            raise ValueError(f"No valid {modality} embeddings could be extracted. All files may be corrupted or unsupported.")
+            extraction_started = time.monotonic()
+            values, cached_labels = self._extract(files, labels)
+            self.last_embedding_seconds = (
+                time.monotonic() - extraction_started
+            )
+            self.last_cache_hit = False
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary_path = cache_path.with_suffix(".tmp.npz")
+            np.savez_compressed(
+                temporary_path,
+                X=values.astype(np.float16),
+                y=np.asarray(cached_labels, dtype=str),
+                embedding_seconds=np.asarray(self.last_embedding_seconds),
+            )
+            temporary_path.replace(cache_path)
+            print(f"[Cache] Saved embeddings to {cache_path}.")
 
-        y = pd.Series(valid_labels)
-        
-        print(f"[UniversalEmbedder] Raw embeddings shape: {X_raw.shape} | Labels: {len(y)}")
-        
-        # PCA Dimensionality Reduction (Dynamic based on Variance)
-        if X_raw.shape[1] > 100:
-            print(f"[UniversalEmbedder] Applying Dynamic PCA on {X_raw.shape[1]} dimensions...")
-            from sklearn.decomposition import PCA
-            
-            # Calculate how many components are needed for 95% variance
-            pca_full = PCA(n_components=min(512, X_raw.shape[0], X_raw.shape[1]), random_state=42)
-            pca_full.fit(X_raw)
-            cumulative_var = np.cumsum(pca_full.explained_variance_ratio_)
-            
-            # Target 95% variance, but cap at 300D to prevent RAM explosion
-            n_components_95 = np.searchsorted(cumulative_var, 0.95) + 1
-            final_dim = min(max(n_components_95, 100), 300) 
-            final_dim = min(final_dim, X_raw.shape[0])
-            
-            print(f"[UniversalEmbedder] Dynamic PCA: Using {final_dim} components ({cumulative_var[final_dim-1]:.2%} variance)")
-            
-            pca = PCA(n_components=final_dim, random_state=42)
-            X_reduced = pca.fit_transform(X_raw)
-        else:
-            X_reduced = X_raw
-            
-        # Convert to Pandas DataFrame
-        feature_names = [f"feat_{i}" for i in range(X_reduced.shape[1])]
-        X_df = pd.DataFrame(X_reduced, columns=feature_names)
-        
-        # 4. Save to cache for next time
-        np.savez_compressed(cache_path, X=X_reduced, y=np.array(valid_labels))
-        print(f"💾 [Cache Saved] Embeddings stored at {cache_path}")
-        
-        return X_df, y
-
-
+        columns = [f"feat_{index}" for index in range(values.shape[1])]
+        return pd.DataFrame(values, columns=columns), pd.Series(cached_labels)

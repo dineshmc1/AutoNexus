@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 from sklearn.base import clone
-from sklearn.model_selection import cross_val_score
+from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
 
@@ -34,15 +34,24 @@ from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
 from sklearn.naive_bayes import GaussianNB
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 from sklearn.neural_network import MLPClassifier, MLPRegressor
-try:
-    from lightgbm import LGBMClassifier, LGBMRegressor
-except ImportError:
-    LGBMClassifier = LGBMRegressor = None
 
-try:
-    from xgboost import XGBClassifier, XGBRegressor
-except ImportError:
-    XGBClassifier = XGBRegressor = None
+
+def _prepare_fold(
+    preprocessor: ColumnTransformer,
+    X_train,
+    y_train,
+    X_validation,
+):
+    """Fit preprocessing on one fold and transform both fold partitions."""
+    fitted = clone(preprocessor)
+    transformed_train = fitted.fit_transform(X_train, y_train)
+    transformed_validation = fitted.transform(X_validation)
+    return fitted, transformed_train, transformed_validation
+
+
+def _prepare_full(preprocessor: ColumnTransformer, X, y):
+    fitted = clone(preprocessor)
+    return fitted, fitted.fit_transform(X, y)
 
 
 # Model catalogue
@@ -56,7 +65,18 @@ CLASSIFICATION_MODELS = {
     "svc":         SVC(probability=True, random_state=42),
     "mlp_clf":     MLPClassifier(max_iter=5000, early_stopping=True, validation_fraction=0.1, n_iter_no_change=20, random_state=42),
     "rf":          RandomForestClassifier(n_estimators=100, n_jobs=-1, random_state=42),
-    "et_clf":      ExtraTreesClassifier(n_estimators=100, n_jobs=-1, random_state=42),
+    "et_clf":      ExtraTreesClassifier(
+        n_estimators=200,
+        max_depth=24,
+        min_samples_split=6,
+        min_samples_leaf=2,
+        max_features="sqrt",
+        bootstrap=True,
+        max_samples=0.85,
+        oob_score=True,
+        n_jobs=-1,
+        random_state=42,
+    ),
     "ada_clf":     AdaBoostClassifier(n_estimators=100, random_state=42),
     "bag_clf":     BaggingClassifier(n_estimators=20, n_jobs=-1, random_state=42),
     "gb":          HistGradientBoostingClassifier(random_state=42),
@@ -72,27 +92,69 @@ REGRESSION_MODELS = {
     "svr":         SVR(),
     "mlp_reg":     MLPRegressor(max_iter=5000, early_stopping=True, validation_fraction=0.1, n_iter_no_change=20, random_state=42),
     "rf_reg":      RandomForestRegressor(n_estimators=100, n_jobs=-1, random_state=42),
-    "et_reg":      ExtraTreesRegressor(n_estimators=100, n_jobs=-1, random_state=42),
+    "et_reg":      ExtraTreesRegressor(
+        n_estimators=200,
+        max_depth=24,
+        min_samples_split=6,
+        min_samples_leaf=2,
+        max_features="sqrt",
+        bootstrap=True,
+        max_samples=0.85,
+        oob_score=True,
+        n_jobs=-1,
+        random_state=42,
+    ),
     "ada_reg":     AdaBoostRegressor(n_estimators=100, random_state=42),
     "bag_reg":     BaggingRegressor(n_estimators=20, n_jobs=-1, random_state=42),
     "gb_reg":      HistGradientBoostingRegressor(random_state=42),
 }  # 15 regression models
 
-if LGBMClassifier is not None:
-    CLASSIFICATION_MODELS["lgbm_clf"] = LGBMClassifier(
-        n_estimators=100, random_state=42, verbose=-1
+def _get_catalogue(
+    problem_type: str,
+    requested: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Build the catalogue while importing optional boosters only on demand."""
+    catalogue = dict(
+        REGRESSION_MODELS
+        if problem_type == "regression"
+        else CLASSIFICATION_MODELS
     )
-    REGRESSION_MODELS["lgbm_reg"] = LGBMRegressor(
-        n_estimators=100, random_state=42, verbose=-1
-    )
+    wanted = set(requested or ["all"])
+    load_all = "all" in wanted
 
-if XGBClassifier is not None:
-    CLASSIFICATION_MODELS["xgb_clf"] = XGBClassifier(
-        n_estimators=100, random_state=42, eval_metric="logloss", verbosity=0
-    )
-    REGRESSION_MODELS["xgb_reg"] = XGBRegressor(
-        n_estimators=100, random_state=42, verbosity=0
-    )
+    if load_all or wanted & {"lgbm_clf", "lgbm_reg"}:
+        try:
+            from lightgbm import LGBMClassifier, LGBMRegressor
+
+            if problem_type == "classification":
+                catalogue["lgbm_clf"] = LGBMClassifier(
+                    n_estimators=300, random_state=42, verbose=-1
+                )
+            else:
+                catalogue["lgbm_reg"] = LGBMRegressor(
+                    n_estimators=300, random_state=42, verbose=-1
+                )
+        except ImportError:
+            pass
+
+    if load_all or wanted & {"xgb_clf", "xgb_reg"}:
+        try:
+            from xgboost import XGBClassifier, XGBRegressor
+
+            if problem_type == "classification":
+                catalogue["xgb_clf"] = XGBClassifier(
+                    n_estimators=300,
+                    random_state=42,
+                    eval_metric="logloss",
+                    verbosity=0,
+                )
+            else:
+                catalogue["xgb_reg"] = XGBRegressor(
+                    n_estimators=300, random_state=42, verbosity=0
+                )
+        except ImportError:
+            pass
+    return catalogue
 
 
 def get_models(
@@ -101,10 +163,7 @@ def get_models(
     n_samples: int = 0
 ) -> Dict[str, Any]:
     # Return a dict of ``{name: estimator_instance}`` for the requested problem type.
-    if problem_type == "regression":
-        catalogue = REGRESSION_MODELS
-    else:
-        catalogue = CLASSIFICATION_MODELS
+    catalogue = _get_catalogue(problem_type, model_names)
 
     if model_names is None or "all" in model_names:
         selected = {k: clone(v) for k, v in catalogue.items()}
@@ -126,7 +185,13 @@ def get_models(
 
 def create_model(model_name: str, params: Optional[Dict[str, Any]] = None) -> Any:
     """Create an un-fitted instance of a model by its name, with optional custom parameters."""
-    catalogue = CLASSIFICATION_MODELS if model_name in CLASSIFICATION_MODELS else REGRESSION_MODELS
+    problem_type = (
+        "classification"
+        if model_name.endswith("_clf")
+        or model_name in CLASSIFICATION_MODELS
+        else "regression"
+    )
+    catalogue = _get_catalogue(problem_type, [model_name])
     if model_name not in catalogue:
         raise ValueError(f"Unknown model name: {model_name}")
     
@@ -136,13 +201,20 @@ def create_model(model_name: str, params: Optional[Dict[str, Any]] = None) -> An
     return model
 
 
-def _configure_estimator(name: str, estimator: Any, y: Any) -> Any:
+def _configure_estimator(
+    name: str,
+    estimator: Any,
+    y: Any,
+    use_early_stopping: bool = False,
+) -> Any:
     """Apply target-dependent settings that cannot live in the static catalog."""
     if name == "xgb_clf":
         n_classes = len(np.unique(y))
         estimator.set_params(
             eval_metric="mlogloss" if n_classes > 2 else "logloss"
         )
+    if use_early_stopping and name in {"xgb_clf", "xgb_reg"}:
+        estimator.set_params(early_stopping_rounds=20)
     return estimator
 
 
@@ -158,8 +230,17 @@ def _train_and_evaluate(
     start: float,
     max_time_seconds: Optional[float],
     refit_full: bool = False,
-) -> Tuple[float, Optional[Pipeline]]:
-    from sklearn.model_selection import StratifiedKFold, KFold, train_test_split
+    preprocessing_memory: Any = None,
+    groups: Optional[np.ndarray] = None,
+    random_state: int = 42,
+) -> Tuple[float, Optional[Pipeline], float]:
+    from sklearn.model_selection import (
+        GroupKFold,
+        KFold,
+        StratifiedGroupKFold,
+        StratifiedKFold,
+        train_test_split,
+    )
     from sklearn.base import clone
     from sklearn.metrics import accuracy_score, mean_squared_error
     from sklearn.pipeline import Pipeline
@@ -171,28 +252,66 @@ def _train_and_evaluate(
     # Removed redundant LabelEncoder here, doing it per-fold to handle missing classes in CV splits
             
     cv_val = min(cv, len(X))
+    groups_array = None if groups is None else np.asarray(groups)
+    if groups_array is not None and len(groups_array) != len(X):
+        raise ValueError("CV groups must align with the training rows.")
+    if is_classification:
+        _, class_counts = np.unique(y, return_counts=True)
+        cv_val = min(cv_val, int(class_counts.min()))
+        if groups_array is not None:
+            y_array = np.asarray(y)
+            class_group_counts = [
+                len(np.unique(groups_array[y_array == label]))
+                for label in np.unique(y_array)
+            ]
+            cv_val = min(cv_val, min(class_group_counts, default=1))
+            if cv_val <= 1:
+                groups_array = None
+    elif groups_array is not None:
+        cv_val = min(cv_val, len(np.unique(groups_array)))
+        if cv_val <= 1:
+            groups_array = None
     
     if cv_val <= 1:
         # Single validation split for large datasets (speed and early stopping)
         if is_classification:
-            unique, counts = np.unique(y, return_counts=True)
-            if counts.min() < 2:
-                splits = [train_test_split(np.arange(len(X)), test_size=0.15, random_state=42)]
-            else:
-                splits = [train_test_split(np.arange(len(X)), test_size=0.15, random_state=42, stratify=y)]
+            splits = [
+                train_test_split(
+                    np.arange(len(X)),
+                    test_size=0.15,
+                    random_state=random_state,
+                    stratify=y,
+                )
+            ]
         else:
-            splits = [train_test_split(np.arange(len(X)), test_size=0.15, random_state=42)]
+            splits = [
+                train_test_split(
+                    np.arange(len(X)),
+                    test_size=0.15,
+                    random_state=random_state,
+                )
+            ]
     else:
-        if is_classification:
-            unique, counts = np.unique(y, return_counts=True)
-            if counts.min() < cv_val:
-                kf = KFold(n_splits=cv_val, shuffle=True, random_state=42)
-            else:
-                kf = StratifiedKFold(n_splits=cv_val, shuffle=True, random_state=42)
+        if is_classification and groups_array is not None:
+            kf = StratifiedGroupKFold(
+                n_splits=cv_val,
+                shuffle=True,
+                random_state=random_state,
+            )
+            splits = list(kf.split(X, y, groups_array))
+        elif is_classification:
+            kf = StratifiedKFold(
+                n_splits=cv_val, shuffle=True, random_state=random_state
+            )
+            splits = list(kf.split(X, y))
+        elif groups_array is not None:
+            kf = GroupKFold(n_splits=cv_val)
+            splits = list(kf.split(X, y, groups_array))
         else:
-            kf = KFold(n_splits=cv_val, shuffle=True, random_state=42)
-            
-        splits = list(kf.split(X, y))
+            kf = KFold(
+                n_splits=cv_val, shuffle=True, random_state=random_state
+            )
+            splits = list(kf.split(X, y))
             
     best_pipe = None
     cv_scores = []
@@ -200,7 +319,7 @@ def _train_and_evaluate(
     
     print(f"  [Trainer] Commencing training loop for '{name}'...")
     for fold, (train_idx, val_idx) in enumerate(splits):
-        if max_time_seconds and (time.time() - start) > max_time_seconds:
+        if max_time_seconds and (time.monotonic() - start) > max_time_seconds:
             print(f"    [Timeout] Stopping {name} early due to time budget.")
             break
             
@@ -209,32 +328,23 @@ def _train_and_evaluate(
         X_va = X.iloc[val_idx] if hasattr(X, "iloc") else X[val_idx]
         y_va = y.iloc[val_idx] if hasattr(y, "iloc") else y[val_idx]
         
-        prep = clone(preprocessor)
-        X_tr_prep = prep.fit_transform(X_tr, y_tr)
+        prepare_fold = (
+            preprocessing_memory.cache(_prepare_fold)
+            if preprocessing_memory is not None
+            else _prepare_fold
+        )
+        prep, X_tr_prep, X_va_prep = prepare_fold(
+            preprocessor, X_tr, y_tr, X_va
+        )
         
         if scipy.sparse.issparse(X_tr_prep) and name == "gb":
             print(f"    Skipping '{name}' as transformations yielded sparse matrix.")
-            return -float('inf'), None
+            return -float('inf'), None, 0.0
             
-        X_va_prep = prep.transform(X_va)
-        
         fit_kwargs = {}
-        if is_classification:
-            from sklearn.preprocessing import LabelEncoder
-            le_fold = LabelEncoder()
-            y_tr = le_fold.fit_transform(y_tr)
-            
         if name in ["lgbm_clf", "lgbm_reg", "xgb_clf", "xgb_reg"]:
             if is_classification:
-                # Filter eval_set to only contain classes present in y_tr
-                valid_mask = np.isin(y_va, le_fold.classes_)
-                y_va_eval = le_fold.transform(np.array(y_va)[valid_mask])
-                
-                if scipy.sparse.issparse(X_va_prep):
-                    X_va_eval = X_va_prep.tocsr()[valid_mask]
-                else:
-                    X_va_eval = X_va_prep[valid_mask]
-                fit_kwargs["eval_set"] = [(X_va_eval, y_va_eval)]
+                fit_kwargs["eval_set"] = [(X_va_prep, y_va)]
             else:
                 fit_kwargs["eval_set"] = [(X_va_prep, y_va)]
             if name in ["lgbm_clf", "lgbm_reg"]:
@@ -246,14 +356,18 @@ def _train_and_evaluate(
             elif name in ["xgb_clf", "xgb_reg"]:
                 fit_kwargs["verbose"] = 10
                 
-        est = _configure_estimator(name, clone(estimator), y_tr)
-        start_fold = time.time()
+        est = _configure_estimator(
+            name,
+            clone(estimator),
+            y_tr,
+            use_early_stopping=name in {"xgb_clf", "xgb_reg"},
+        )
+        start_fold = time.monotonic()
         est.fit(X_tr_prep, y_tr, **fit_kwargs)
-        fold_times.append(time.time() - start_fold)
+        fold_times.append(time.monotonic() - start_fold)
         
         y_pred = est.predict(X_va_prep)
         if is_classification:
-            y_pred = le_fold.inverse_transform(y_pred)
             sc = accuracy_score(y_va, y_pred)
         else:
             sc = -np.sqrt(mean_squared_error(y_va, y_pred))
@@ -270,8 +384,12 @@ def _train_and_evaluate(
     
     if cv_val > 1 and refit_full:
         print(f"  [Trainer] Refitting {name} on ALL data...")
-        prep = clone(preprocessor)
-        X_prep = prep.fit_transform(X, y)
+        prepare_full = (
+            preprocessing_memory.cache(_prepare_full)
+            if preprocessing_memory is not None
+            else _prepare_full
+        )
+        prep, X_prep = prepare_full(preprocessor, X, y)
         est = _configure_estimator(name, clone(estimator), y)
         est.fit(X_prep, y)
         best_pipe = Pipeline([("preprocessor", prep), ("model", est)])
@@ -291,21 +409,47 @@ def baseline_screen(
     cv: int = 5,
     random_state: int = 42,
     max_time_seconds: Optional[float] = None,
+    preprocessing_cache_dir: Optional[str] = None,
+    groups: Optional[np.ndarray] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, dict]]:
     # Quick evaluation of all candidate models on a data subsample.
     
-    rng = np.random.RandomState(random_state)
     n_sample = max(int(len(X) * sample_frac), 50)
-    idx = rng.choice(len(X), size=min(n_sample, len(X)), replace=False)
+    n_sample = min(n_sample, len(X))
+    if problem_type == "classification" and n_sample < len(X):
+        all_indices = np.arange(len(X))
+        try:
+            idx, _ = train_test_split(
+                all_indices,
+                train_size=n_sample,
+                random_state=random_state,
+                stratify=y,
+            )
+        except ValueError:
+            idx = np.random.RandomState(random_state).choice(
+                len(X), size=n_sample, replace=False
+            )
+    else:
+        idx = np.random.RandomState(random_state).choice(
+            len(X), size=n_sample, replace=False
+        )
     X_sub = X.iloc[idx] if hasattr(X, "iloc") else X[idx]
     y_sub = y.iloc[idx] if hasattr(y, "iloc") else y[idx]
+    groups_sub = None if groups is None else np.asarray(groups)[idx]
 
     scores: Dict[str, dict] = {}
-    start = time.time()
+    start = time.monotonic()
+    preprocessing_memory = None
+    if preprocessing_cache_dir:
+        from joblib import Memory
+
+        preprocessing_memory = Memory(
+            preprocessing_cache_dir, verbose=0
+        )
 
     print(f"\n[Baseline] Screening on {len(X_sub)} samples ({sample_frac:.0%} subsample)…")
     for name, estimator in models.items():
-        if max_time_seconds and (time.time() - start) > max_time_seconds:
+        if max_time_seconds and (time.monotonic() - start) > max_time_seconds:
             print(f"[Baseline] Time budget exhausted – skipping '{name}'.")
             break
 
@@ -313,6 +457,9 @@ def baseline_screen(
             mean_score, _, avg_fit_time = _train_and_evaluate(
                 name, estimator, preprocessor, X_sub, y_sub, problem_type,
                 cv, start, max_time_seconds, refit_full=False,
+                preprocessing_memory=preprocessing_memory,
+                groups=groups_sub,
+                random_state=random_state,
             )
         except Exception as exc:
             print(f"  [Baseline] Skipping '{name}' after training failed: {exc}")
@@ -355,15 +502,25 @@ def full_train(
     problem_type: str,
     cv: int = 5,
     max_time_seconds: Optional[float] = None,
+    preprocessing_cache_dir: Optional[str] = None,
+    groups: Optional[np.ndarray] = None,
+    random_state: int = 42,
 ) -> Tuple[Dict[str, Pipeline], Dict[str, float]]:
     # Train each model on the full training set with cross‑validation or single-split.
     trained: Dict[str, Pipeline] = {}
     scores: Dict[str, float] = {}
-    start = time.time()
+    start = time.monotonic()
+    preprocessing_memory = None
+    if preprocessing_cache_dir:
+        from joblib import Memory
+
+        preprocessing_memory = Memory(
+            preprocessing_cache_dir, verbose=0
+        )
 
     print(f"\n[FullTrain] Training on {len(X)} samples…")
     for name, estimator in models.items():
-        if max_time_seconds and (time.time() - start) > max_time_seconds:
+        if max_time_seconds and (time.monotonic() - start) > max_time_seconds:
             print(f"[FullTrain] Time budget exhausted – skipping '{name}'.")
             break
 
@@ -371,6 +528,9 @@ def full_train(
             mean_score, pipe, _ = _train_and_evaluate(
                 name, estimator, preprocessor, X, y, problem_type,
                 cv, start, max_time_seconds, refit_full=True,
+                preprocessing_memory=preprocessing_memory,
+                groups=groups,
+                random_state=random_state,
             )
         except Exception as exc:
             print(f"  [FullTrain] Skipping '{name}' after training failed: {exc}")

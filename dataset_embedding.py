@@ -45,6 +45,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 EMBEDDING_DIM = 10
+SEARCH_EMBEDDING_VERSION = 2
 _RF_ESTIMATORS = 50
 _RF_MAX_DEPTH = 5
 _CORR_THRESHOLD = 0.5
@@ -197,6 +198,55 @@ def compute_dataset_embedding(
 
     embedding = np.nan_to_num(np.array(features, dtype=np.float32), nan=0.0)
     return embedding
+
+
+def compute_search_embedding(
+    X: pd.DataFrame,
+    y: Optional[Union[pd.Series, np.ndarray]],
+    baseline_scores: Dict[str, Dict[str, float]],
+) -> np.ndarray:
+    """Combine statistical meta-features with fixed family landmarks.
+
+    This is deliberately versioned separately from the legacy 10D/32D FAISS
+    representation so incompatible historical indexes are never queried.
+    """
+    base = compute_dataset_embedding(X, y)
+    families = {
+        "linear": ("logistic", "sgd_clf", "ridge", "sgd_reg"),
+        "gbdt": ("xgb_clf", "lgbm_clf", "gb", "xgb_reg", "lgbm_reg", "gb_reg"),
+        "nonlinear": (
+            "et_clf", "rf", "mlp_clf", "knn_clf",
+            "et_reg", "rf_reg", "mlp_reg", "knn_reg",
+        ),
+    }
+
+    def score_for(names: tuple[str, ...]) -> float:
+        values = [
+            float(baseline_scores[name]["score"])
+            for name in names
+            if name in baseline_scores
+        ]
+        return max(values) if values else -1.0
+
+    all_scores = [
+        float(result["score"]) for result in baseline_scores.values()
+    ]
+    all_times = [
+        float(result.get("time", 0.0))
+        for result in baseline_scores.values()
+    ]
+    landmarks = np.array(
+        [
+            np.tanh(score_for(families["linear"])),
+            np.tanh(score_for(families["gbdt"])),
+            np.tanh(score_for(families["nonlinear"])),
+            np.tanh(max(all_scores)) if all_scores else -1.0,
+            np.tanh(np.ptp(all_scores)) if all_scores else 0.0,
+            np.tanh(np.mean(all_times)) if all_times else 0.0,
+        ],
+        dtype=np.float32,
+    )
+    return np.concatenate([base, landmarks]).astype(np.float32)
 
 
 # ---------------------------------------------------------------------------

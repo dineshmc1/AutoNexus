@@ -1,13 +1,9 @@
-"""
-model_selector.py
-Evaluates trained models, selects the best one, and provides optional
-hyperparameter tuning for the top candidates.
-"""
+"""Held-out evaluation, validation-ranked tuning, and persistence."""
 
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict
 
 import joblib
 import numpy as np
@@ -22,7 +18,12 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score,
 )
-from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
+from sklearn.model_selection import (
+    GridSearchCV,
+    GroupKFold,
+    RandomizedSearchCV,
+    StratifiedGroupKFold,
+)
 from sklearn.pipeline import Pipeline
 
 # Evaluation
@@ -33,7 +34,7 @@ def evaluate_models(
     y_test: np.ndarray,
     problem_type: str,
 ) -> pd.DataFrame:
-    
+    """Compute final metrics on data that was not used for model selection."""
     # Compute metrics for every trained model on the held‑out test set.
     rows: list[dict] = []
 
@@ -77,28 +78,11 @@ def evaluate_models(
     return results
 
 
-# Best model selection
-
-def select_best(
-    results: pd.DataFrame,
-    problem_type: str,
-) -> str:
-    # Pick the best model name from the results table.
-    if problem_type == "classification":
-        best_idx = results["f1"].idxmax()
-    else:
-        best_idx = results["rmse"].idxmin()
-
-    return results.loc[best_idx, "model"]
-
-
-# Hyperparameter tuning
-
 # Default param grids (kept small for speed)
 _PARAM_GRIDS: Dict[str, Dict[str, list]] = {
     "logistic": {
-        "model__C": [0.01, 0.1, 1, 10],
-        "model__solver": ["lbfgs", "liblinear"],
+        "model__C": [0.01, 0.1, 0.5, 1, 5, 10],
+        "model__solver": ["lbfgs", "saga"],
     },
     "rf": {
         "model__n_estimators": [50, 100, 200],
@@ -106,9 +90,26 @@ _PARAM_GRIDS: Dict[str, Dict[str, list]] = {
         "model__min_samples_split": [2, 5],
     },
     "gb": {
-        "model__n_estimators": [50, 100, 200],
+        "model__max_iter": [100, 200, 300],
         "model__learning_rate": [0.01, 0.1, 0.2],
-        "model__max_depth": [3, 5, 7],
+        "model__max_depth": [None, 6, 12],
+        "model__l2_regularization": [0.0, 0.1, 1.0],
+    },
+    "et_clf": {
+        "model__n_estimators": [150, 250, 400],
+        "model__max_depth": [12, 18, 24, 32],
+        "model__min_samples_leaf": [2, 4, 8],
+        "model__min_samples_split": [4, 8, 16],
+        "model__max_features": ["sqrt", 0.25, 0.5],
+        "model__max_samples": [0.7, 0.85, 1.0],
+    },
+    "et_reg": {
+        "model__n_estimators": [150, 250, 400],
+        "model__max_depth": [12, 18, 24, 32],
+        "model__min_samples_leaf": [2, 4, 8],
+        "model__min_samples_split": [4, 8, 16],
+        "model__max_features": ["sqrt", 0.25, 0.5],
+        "model__max_samples": [0.7, 0.85, 1.0],
     },
     "linear": {},
 }
@@ -119,23 +120,53 @@ def tune_top_models(
     X_train: np.ndarray,
     y_train: np.ndarray,
     problem_type: str,
-    results: pd.DataFrame,
+    validation_scores: Dict[str, float],
     top_n: int = 2,
     method: str = "randomized",
     n_iter: int = 20,
     cv: int = 5,
-) -> Dict[str, Pipeline]:
-    
-    # Run hyperparameter search on the *top_n* best models.
+    groups: np.ndarray | None = None,
+) -> tuple[Dict[str, Pipeline], Dict[str, float]]:
+    """Tune candidates ranked only by development-set validation scores."""
     if problem_type == "classification":
-        sorted_results = results.sort_values("f1", ascending=False)
-        scoring = "f1_weighted"
+        scoring = "accuracy"
     else:
-        sorted_results = results.sort_values("rmse", ascending=True)
         scoring = "neg_root_mean_squared_error"
 
-    top_names = sorted_results["model"].head(top_n).tolist()
+    search_cv: int | Any = cv
+    fit_kwargs: dict[str, Any] = {}
+    if groups is not None:
+        groups_array = np.asarray(groups)
+        fit_kwargs["groups"] = groups_array
+        if problem_type == "classification":
+            y_array = np.asarray(y_train)
+            class_group_counts = [
+                len(np.unique(groups_array[y_array == label]))
+                for label in np.unique(y_array)
+            ]
+            group_cv = min(cv, min(class_group_counts, default=2))
+            if group_cv >= 2:
+                search_cv = StratifiedGroupKFold(
+                    n_splits=group_cv,
+                    shuffle=True,
+                    random_state=42,
+                )
+            else:
+                fit_kwargs = {}
+        else:
+            group_cv = min(cv, len(np.unique(groups_array)))
+            if group_cv >= 2:
+                search_cv = GroupKFold(n_splits=group_cv)
+            else:
+                fit_kwargs = {}
+
+    top_names = sorted(
+        trained,
+        key=lambda name: validation_scores.get(name, -np.inf),
+        reverse=True,
+    )[:top_n]
     tuned: Dict[str, Pipeline] = {}
+    tuned_scores: Dict[str, float] = {}
 
     print(f"\n[Tuner] Tuning top {top_n} model(s): {top_names}")
 
@@ -146,28 +177,30 @@ def tune_top_models(
         if not param_grid:
             print(f"  {name}: no param grid defined – skipping tuning.")
             tuned[name] = pipe
+            tuned_scores[name] = validation_scores.get(name, -np.inf)
             continue
 
         if method == "grid":
             searcher = GridSearchCV(
-                pipe, param_grid, scoring=scoring, cv=cv, n_jobs=-1,
+                pipe, param_grid, scoring=scoring, cv=search_cv, n_jobs=-1,
                 refit=True,
             )
         else:
             searcher = RandomizedSearchCV(
-                pipe, param_grid, scoring=scoring, cv=cv, n_jobs=-1,
+                pipe, param_grid, scoring=scoring, cv=search_cv, n_jobs=-1,
                 n_iter=min(n_iter, _grid_size(param_grid)),
                 refit=True, random_state=42,
             )
 
-        searcher.fit(X_train, y_train)
+        searcher.fit(X_train, y_train, **fit_kwargs)
         tuned[name] = searcher.best_estimator_
+        tuned_scores[name] = float(searcher.best_score_)
         print(
             f"  {name}: best params = {searcher.best_params_}, "
             f"best score = {searcher.best_score_:.4f}"
         )
 
-    return tuned
+    return tuned, tuned_scores
 
 
 def _grid_size(param_grid: dict) -> int:
@@ -180,14 +213,18 @@ def _grid_size(param_grid: dict) -> int:
 # Persistence helpers
 
 def save_model(model: Any, path: str) -> None:
-    """Persist a model to disk using joblib."""
+    """Persist a model atomically."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    joblib.dump(model, path)
+    temporary_path = f"{path}.tmp"
+    joblib.dump(model, temporary_path)
+    os.replace(temporary_path, path)
     print(f"[Selector] Best model saved → {path}")
 
 
 def save_metrics(results: pd.DataFrame, path: str) -> None:
-    """Save the metrics DataFrame as CSV."""
+    """Save metrics atomically."""
     os.makedirs(os.path.dirname(path) if os.path.dirname(path) else ".", exist_ok=True)
-    results.to_csv(path, index=False)
+    temporary_path = f"{path}.tmp"
+    results.to_csv(temporary_path, index=False)
+    os.replace(temporary_path, path)
     print(f"[Selector] Metrics saved → {path}")

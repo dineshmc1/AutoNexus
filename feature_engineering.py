@@ -45,6 +45,7 @@ class FeatureEngineer:
         self._datetime_features: Dict[str, List[str]] = {}
         self._high_card_cols: List[str] = []
         self._encoding_maps: Dict[str, Dict[Any, float]] = {}
+        self._encoding_fallbacks: Dict[str, float] = {}
         self._yeojohnson_transformer: Optional[PowerTransformer] = None
         self._skew_cols: List[str] = []
         self._outlier_bounds: Dict[str, Tuple[float, float]] = {}
@@ -245,9 +246,22 @@ class FeatureEngineer:
             unique_ratio = X[col].nunique() / len(X) if len(X) > 0 else 0
             if unique_ratio > self.cardinality_threshold:
                 self._high_card_cols.append(col)
-                enc_map = self._target_encode_fit(X[col], y)
-                self._encoding_maps[col] = enc_map
-                X[col] = X[col].map(enc_map).fillna(y.mean()).astype(float)
+                if problem_type == "classification" and y.nunique() > 2:
+                    # A scalar mean of arbitrary multiclass IDs is not a
+                    # meaningful target encoding. Frequency is regularized
+                    # and preserves no artificial class ordering.
+                    frequencies = X[col].value_counts(normalize=True).to_dict()
+                    fallback = 1.0 / max(len(X), 1)
+                    self._encoding_maps[col] = frequencies
+                    self._encoding_fallbacks[col] = fallback
+                    X[col] = X[col].map(frequencies).fillna(fallback)
+                else:
+                    oof, full_map, fallback = self._target_encode_fit(
+                        X[col], y
+                    )
+                    self._encoding_maps[col] = full_map
+                    self._encoding_fallbacks[col] = fallback
+                    X[col] = oof
                 self._feature_types[col] = "categorical_encoded"
         return X
 
@@ -255,21 +269,51 @@ class FeatureEngineer:
         for col in self._high_card_cols:
             if col in X.columns:
                 enc_map = self._encoding_maps[col]
-                X[col] = X[col].map(enc_map).fillna(np.mean(list(enc_map.values()))).astype(float)
+                fallback = self._encoding_fallbacks[col]
+                X[col] = X[col].map(enc_map).fillna(fallback).astype(float)
         return X
 
-    def _target_encode_fit(self, series: pd.Series, y: pd.Series, n_splits: int = 5, smoothing: float = 10.0) -> Dict[Any, float]:
+    def _target_encode_fit(
+        self,
+        series: pd.Series,
+        y: pd.Series,
+        n_splits: int = 5,
+        smoothing: float = 20.0,
+    ) -> Tuple[pd.Series, Dict[Any, float], float]:
+        """Return leakage-safe OOF values and a smoothed inference mapping."""
+        series = series.reset_index(drop=True)
+        y = y.reset_index(drop=True).astype(float)
         encoding = pd.Series(np.nan, index=series.index, dtype=float)
-        kf = KFold(n_splits=min(n_splits, len(series)), shuffle=True, random_state=self.random_state)
-        global_mean = y.mean()
+        splits = min(n_splits, len(series))
+        if splits < 2:
+            fallback = float(y.mean())
+            return (
+                pd.Series(fallback, index=series.index),
+                {},
+                fallback,
+            )
+        kf = KFold(
+            n_splits=splits, shuffle=True, random_state=self.random_state
+        )
+        global_mean = float(y.mean())
         for train_idx, val_idx in kf.split(series):
             train_series, train_y = series.iloc[train_idx], y.iloc[train_idx]
             counts = train_series.value_counts()
             means = train_y.groupby(train_series).mean()
             lambda_w = counts / (counts + smoothing)
             smoothed_means = lambda_w * means + (1 - lambda_w) * global_mean
-            encoding.iloc[val_idx] = series.iloc[val_idx].map(smoothed_means)
-        return encoding.groupby(series).mean().to_dict()
+            encoding.iloc[val_idx] = (
+                series.iloc[val_idx].map(smoothed_means).fillna(global_mean)
+            )
+
+        full_counts = series.value_counts()
+        full_means = y.groupby(series).mean()
+        full_weights = full_counts / (full_counts + smoothing)
+        full_map = (
+            full_weights * full_means
+            + (1 - full_weights) * global_mean
+        ).to_dict()
+        return encoding.fillna(global_mean), full_map, global_mean
 
     def _fit_outliers(self, X: pd.DataFrame) -> pd.DataFrame:
         if self.outlier_strategy == "none": return X
