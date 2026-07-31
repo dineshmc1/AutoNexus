@@ -3,9 +3,9 @@ requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "automated-ml-pipeline"
+name = "AutoNexus"
 version = "1.0.0"
-description = "Production CLI for automated tabular and image classification"
+description = "Developer-first automated ML, monitoring, drift, and online learning framework"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -25,6 +25,14 @@ dependencies = [
 [project.optional-dependencies]
 boosting = ["lightgbm>=4", "xgboost>=2"]
 explain = ["shap>=0.42"]
+vision = [
+    "peft>=0.10",
+    "pillow>=10",
+    "torch>=2",
+    "tqdm>=4.66",
+    "transformers>=4.40",
+]
+# Backward-compatible alias for the original optional-extra name.
 images = [
     "peft>=0.10",
     "pillow>=10",
@@ -33,25 +41,41 @@ images = [
     "transformers>=4.40",
 ]
 llm = ["litellm>=1", "python-dotenv>=1"]
+memory = ["faiss-cpu>=1.8"]
+monitoring = ["prometheus-client>=0.20", "opentelemetry-api>=1.24"]
+serve = ["fastapi>=0.111", "uvicorn>=0.30"]
+streaming = ["kafka-python-ng>=2.2", "pyarrow>=16", "sqlalchemy>=2"]
+analytics = ["umap-learn>=0.5"]
 dev = ["pytest>=8"]
 all = [
+    "faiss-cpu>=1.8",
+    "fastapi>=0.111",
+    "kafka-python-ng>=2.2",
     "lightgbm>=4",
     "litellm>=1",
+    "opentelemetry-api>=1.24",
     "peft>=0.10",
     "pillow>=10",
+    "prometheus-client>=0.20",
+    "pyarrow>=16",
     "python-dotenv>=1",
     "shap>=0.42",
+    "sqlalchemy>=2",
     "torch>=2",
     "tqdm>=4.66",
     "transformers>=4.40",
+    "umap-learn>=0.5",
+    "uvicorn>=0.30",
     "xgboost>=2",
 ]
 
 [project.scripts]
 ml-builder = "main:main"
+autonexus = "main:main"
 
 [tool.setuptools]
 py-modules = [
+    "AutoNexus",
     "config",
     "data_cleaner",
     "data_loader",
@@ -61,6 +85,7 @@ py-modules = [
     "feature_engineering",
     "feature_processing",
     "generalization",
+    "analytics_artifacts",
     "backbone_selector",
     "image_splitting",
     "llm_explainer",
@@ -70,11 +95,15 @@ py-modules = [
     "model_selector",
     "model_trainer",
     "multimodal_extractor",
+    "nexus_predictor",
     "notebook_generator",
     "report_generator",
     "resource_manager",
     "vision_backbones",
 ]
+
+[tool.setuptools.packages.find]
+include = ["autonexus*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

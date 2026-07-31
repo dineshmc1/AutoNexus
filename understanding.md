@@ -1,9 +1,14 @@
-# ML-Builder: Project Understanding
+# AutoNexus: Project Understanding
 
 ## 1. Executive Summary
 
-ML-Builder is a Python 3.12 command-line AutoML system with one public
-entrypoint: `main.py` (or the installed `ml-builder` command). It accepts:
+AutoNexus is a Python 3.12 AutoML framework with two interfaces over one
+training engine:
+
+- `autonexus.AutoNexus` is the compact SDK used by applications.
+- `main.py`, `autonexus`, and `ml-builder` expose the same engine as a CLI.
+
+It accepts:
 
 - Tabular classification or regression data in CSV, XLSX, or XLS format.
 - Image classification data arranged in class-named folders.
@@ -15,16 +20,21 @@ train with cross-validation, optionally tune and ensemble, calibrate
 classification probabilities, evaluate once on test, and write a reusable
 model plus reports and reproducibility metadata.
 
+Every successful run has a strict artifact contract: `run.json`, `model.pkl`,
+`analysis.ipynb`, `report/explanation.md`, and `search_profile.json`.
 The production distribution is explicitly declared in `pyproject.toml`.
-Historical FAISS, W&B, agentic, and NAS prototypes are not imported by
-`main.py` and are not included in the built wheel.
+Historical W&B, agentic, and NAS prototypes are not imported and are excluded
+from the built wheel.
 
 ## 2. System Boundary
 
 ```mermaid
 flowchart LR
-    User[User / shell] --> CLI[main.py / ml-builder]
-    CLI --> Input{Input type}
+    Developer[Python application] --> SDK[autonexus.AutoNexus]
+    User[User / shell] --> CLI[main.py / autonexus / ml-builder]
+    SDK --> Engine[main.run RunConfig]
+    CLI --> Engine
+    Engine --> Input{Input type}
     Input -->|CSV / Excel| Tabular[Tabular loader]
     Input -->|Directory| Vision[Grouped split and automatic backbone tournament]
     Tabular --> AutoML[Unified AutoML path]
@@ -32,12 +42,15 @@ flowchart LR
     AutoML --> Selection[Validation-only selection]
     Selection --> Test[One final held-out test]
     Test --> Artifacts[Model, metrics, manifest, reports]
-    Artifacts --> User
+    Artifacts --> Lifecycle[Predict, monitor, update, register, serve]
+    Lifecycle --> User
 ```
 
-The stable contract ends at the CLI and its artifacts. FAISS memory learning,
-W&B experiment tracking, autonomous agents, audio/video/text embedding, and
-neural architecture search are not production runtime features.
+The stable contract includes the SDK, CLI, serialized run bundle, drift
+baseline, local meta-memory, streaming source protocol, update gate, model
+registry, and optional inference server. W&B experiment tracking, autonomous
+agents, executable-file analysis, audio/video/text training, and neural
+architecture search are not production runtime features.
 
 ## 3. Main Execution Path
 
@@ -70,6 +83,29 @@ training, paths are resolved, and image folders never require a target option.
 The interactive path prompt also parses trailing options such as
 `--adapt-lora`. Selecting a folder named `train` automatically resolves to its
 parent when a sibling `test` folder is present.
+
+### 3.1 SDK Lifecycle
+
+```mermaid
+flowchart TD
+    A[AutoNexus configuration or preset] --> B[fit path, DataFrame, or DataSource]
+    B --> C[Materialize a reproducible input boundary]
+    C --> D[main.run unified engine]
+    D --> E[NexusModel loaded from model.pkl and run.json]
+    E --> F[Persist drift baseline and framework.json]
+    E --> G[Optional custom LLM report]
+    E --> H[predict / predict_proba]
+    E --> I[monitor DataSource batches]
+    I --> J{Drift with labels?}
+    J -->|incremental estimator| K[Champion/challenger partial_fit gate]
+    J -->|non-incremental estimator| L[Explicit replacement retrain]
+    E --> M[Register, promote, rollback, or serve]
+```
+
+The SDK does not maintain a second training implementation. It translates
+typed `NexusConfig` values into `RunConfig`, calls `main.run`, then adds
+lifecycle metadata and a persisted monitoring baseline. This prevents CLI and
+library behavior from diverging.
 
 ## 4. Input Workflows
 
@@ -432,15 +468,40 @@ flowchart TD
     H -->|yes| I[LiteLLM request]
     I -->|success| J[LLM explanation.md]
     I -->|failure| K[Deterministic offline explanation.md]
-    A --> L{notebook enabled?}
-    L -->|yes| M[Standalone analysis.ipynb]
+    A --> L[Mandatory analytics artifact]
+    L --> M[Persist bounded analysis_data bundle]
+    M --> N[Pre-training-first analysis.ipynb]
 ```
 
-Report failures are isolated and logged so a plotting or LLM problem does not
-discard a successfully trained model. The Markdown file is still produced
-without network access because the LLM path has an offline fallback.
+Optional HTML/plot failures are isolated and logged. Markdown and notebook
+generation are part of the successful-run artifact contract; the Markdown file
+is still produced without network access because the LLM path has an offline
+fallback.
 
-### 7.1 Runtime Timing Workflow
+### 7.1 Notebook Analysis Workflow
+
+```mermaid
+flowchart TD
+    A[Image discovery and split assignment] --> B[Readability and metadata audit]
+    B --> C[Exact duplicate and bounded near-duplicate checks]
+    C --> D[Persist data_index.csv]
+    D --> E[Train and select final model]
+    E --> F[Persist predictions and raw/calibrated probabilities]
+    F --> G[Persist bounded embeddings and model leaderboard]
+    G --> H[analysis.ipynb]
+    H --> I[Part I: pre-training data, split, quality, and geometry]
+    H --> J[Part II: tournament, metrics, errors, calibration, and model card]
+```
+
+The notebook is generated after a run so it can reference final artifacts, but
+its narrative deliberately presents pre-training evidence first. Expensive
+pixel, near-duplicate, embedding, UMAP, and learning-curve operations are
+bounded. Exact class coverage is retained through paginated representative
+grids, and exact duplicate leakage checks operate across every same-size file.
+Grad-CAM is not fabricated for a downstream model that consumes saved vectors;
+nearest embedding neighbors are used as representation-faithful explanations.
+
+### 7.2 Runtime Timing Workflow
 
 ```mermaid
 flowchart LR
@@ -480,6 +541,15 @@ calibration, final evaluation, and model persistence.
 | Content-aware caching | Embeddings require matching model, adapter, files, labels, and cache schema. |
 | Graceful optional failures | Missing optional packages reduce capabilities instead of breaking core tabular runs. |
 | Artifact-first observability | Metrics, configuration, timing, memory, and report paths are persisted. |
+| One SDK/CLI engine | Programmatic and shell users share `main.run`; there is no duplicate training pipeline. |
+| Mandatory run bundle | Every successful run contains the same five minimum deployment/audit artifacts. |
+| Provider-independent LLM | Reports can use LiteLLM, Ollama, local Transformers, custom callables, or generic JSON APIs without influencing model selection. |
+| Local opt-out meta-memory | Statistical/landmark vectors contribute by default; raw examples are excluded and contribution can be disabled. |
+| Drift as evidence, not auto-promotion | Schema, feature, prediction, and labelled performance signals trigger policy, while candidate promotion remains gated. |
+| Capability-aware updates | Native `partial_fit` is used only when supported; other models request explicit replacement training. |
+| Pluggable boundaries | Estimators, callbacks, data sources, detectors, LLMs, monitoring sinks, and registries have extension points. |
+| Pre-training-first analytics | Data quality, split leakage, class balance, image statistics, and representation geometry are presented before model outcomes. |
+| Bounded deep diagnostics | Large-dataset analytics use deterministic class-covering samples while exact representative class coverage and split fingerprints remain available. |
 
 ## 9. Production Source Files
 
@@ -508,7 +578,23 @@ These are the modules explicitly included in the wheel by `pyproject.toml`.
 | `explainer.py` | Produces permutation importance and optional SHAP explanations for fitted pipelines. |
 | `report_generator.py` | Combines metrics, EDA, explanations, and feature-engineering logs into HTML. |
 | `llm_explainer.py` | Requests a constrained LiteLLM report and writes a deterministic Markdown fallback on any failure. |
-| `notebook_generator.py` | Writes a standalone analysis notebook containing run context and reproducible artifact inspection cells. |
+| `analytics_artifacts.py` | Audits images before training and persists bounded predictions, probabilities, embeddings, leaderboards, fingerprints, versions, hardware, and notebook context. |
+| `notebook_generator.py` | Writes the pre-training-first investigation notebook with data quality, split, image, embedding, tournament, model, error, calibration, learning-curve, group, explainability, reproducibility, and model-card sections. |
+| `nexus_predictor.py` | Serializable inference boundary that keeps feature engineering, the fitted model, label mapping, modality, and metadata together in `model.pkl`. |
+| `AutoNexus.py` | Compatibility shim for `import AutoNexus`; the canonical package import remains `from autonexus import AutoNexus`. |
+| `autonexus/__init__.py` | Curated public API and framework version. |
+| `autonexus/api.py` | High-level fit/load facade, DataFrame/source materialization, callbacks, framework metadata, drift-baseline creation, and custom LLM reporting. |
+| `autonexus/config.py` | Frozen public configuration, duration parsing, presets, overrides, and translation to the unified `RunConfig`. |
+| `autonexus/model.py` | Loaded run lifecycle: tabular/image inference, artifact access, safe incremental gates, replacement retraining, monitoring, registry integration, and FastAPI serving. |
+| `autonexus/drift.py` | Persisted reference distributions and deterministic schema, numeric, categorical, prediction, and task-aware performance drift signals. |
+| `autonexus/monitoring.py` | Batch/stream monitor plus logging, JSONL, webhook, and Prometheus sinks. |
+| `autonexus/data.py` | Restartable DataFrame, file, iterator, SQL, and optional Kafka/Redpanda batch sources. |
+| `autonexus/memory.py` | Privacy-bounded local FAISS/NumPy meta-memory, locking, duplicate prevention, contribution policy, and nearest-run search. |
+| `autonexus/llm.py` | Provider protocol and adapters for callables, LiteLLM, Ollama, local Transformers, and arbitrary JSON HTTP APIs. |
+| `autonexus/registry.py` | Filesystem model versions with champion promotion and rollback history. |
+| `autonexus/plugins.py` | Registration points for custom estimators and extension factories. |
+| `autonexus/callbacks.py` | Failure-isolated lifecycle event callbacks. |
+| `autonexus/exceptions.py` | Stable framework-specific exception hierarchy. |
 
 ## 10. Important Project and Test Files
 
@@ -518,29 +604,44 @@ These are the modules explicitly included in the wheel by `pyproject.toml`.
 | `uv.lock` | Exact reproducible dependency resolution for base and optional extras. |
 | `README.md` | Installation, CLI usage, supported layouts, outputs, and safety guarantees. |
 | `understanding.md` | This architecture and operational reference. |
+| `codes.md` | Copy-ready SDK, CLI, monitoring, streaming, update, registry, serving, memory, and LLM examples. |
 | `.python-version` | Pins the local Python line to 3.12. |
 | `.env.example` | Safe template for LiteLLM model/provider configuration; it contains no real secret. |
 | `.gitignore` | Excludes datasets, secrets, environments, caches, builds, models, and run artifacts. |
 | `tests/test_data_loader.py` | Verifies split preservation, development-only ID filtering, and retention of legitimate predictive features. |
 | `tests/test_cli_calibration.py` | Verifies no-argument CLI parsing and that temperature scaling preserves predicted classes and normalized probabilities. |
 | `tests/test_image_splitting.py` | Verifies group isolation/CV, nested tournament samples, automatic backbone selection, CLIP fallback, LoRA probing, and ExtraTrees defaults without model downloads. |
+| `tests/test_notebook_analytics.py` | Verifies unreadable/duplicate image auditing, pre-training-first section order, code-cell syntax, persisted analysis artifacts, and end-to-end notebook-cell execution. |
+| `tests/test_framework.py` | Verifies imports, drift, memory deduplication/search, the compact API, mandatory artifacts, inference, monitoring, and gated incremental update. |
 
 ## 11. Runtime Artifacts and Their Meaning
 
 | Artifact | Meaning |
 |---|---|
-| `best_model.joblib` | Deployable fitted preprocessing/model object. Treat it as untrusted executable data if received from another source. |
+| `model.pkl` | Public deployable `NexusPredictor` bundle with fitted transformations, model, labels, and modality. Treat it as untrusted executable data if received from another source. |
+| `best_model.joblib` | Internal fitted preprocessing/model object retained for compatibility and diagnostics. |
 | `metrics.csv` | Final held-out metrics for the selected deployment model. |
-| `run.json` | Run configuration, every backbone stage/score/failure, selected representation, grouping, primary/gate/test metrics, timings, RAM/VRAM, calibration, and ensemble metadata. |
-| `search_profile.json` | Versioned statistical and landmark vector; it is not itself a trained model or an active FAISS lookup. |
+| `run.json` | Model used, label column, configuration, every backbone stage/score/failure, selected representation, grouping, primary/gate/test metrics, timings, RAM/VRAM, calibration, ensemble, artifact contract, and memory contribution result. |
+| `search_profile.json` | Versioned statistical and landmark vector used for optional local FAISS/NumPy nearest-run memory. |
 | `report/report.html` | Human-readable combined report with embedded plots. |
 | `report/explanation.md` | LLM-generated or deterministic offline model explanation. |
-| `report/analysis.ipynb` | Standalone notebook for inspecting run outputs. |
+| `analysis.ipynb` | Pre-training-first data investigation and post-training model audit. |
+| `analysis_data/data_index.csv` | Image path, split, class/group, readability, dimensions, format, file size, exact hash, bounded quality statistics, and near-duplicate candidates. |
+| `analysis_data/prediction_index.csv` | Held-out labels, predictions, confidence, uncertainty, correctness/error, row/image identity, and optional groups. |
+| `analysis_data/test_probabilities.npz` | Raw and temperature-scaled held-out probabilities used for calibration and per-class diagnostics. |
+| `analysis_data/embedding_sample.npz` | Deterministic class-covering FP16 representation sample for PCA/UMAP, separation, learning curves, and nearest neighbors. |
+| `analysis_data/model_leaderboard.csv` | Baseline, CV mean/std, completed folds, selected test metrics, runtime, and observed process RAM. |
+| `analysis_data/run_context.json` | Configuration, final summary, hardware, package versions, exact split fingerprints, and artifact paths. |
 | `report/eda/*.png` | Target, feature, and correlation diagnostics. |
 | `report/explanations/*.png` | Permutation importance and optional SHAP diagnostics. |
 | `.cache/preprocessing/` | Joblib cache of fold-specific fitted transformations. |
 | `.cache/embeddings/*.npz` | Exact split/model/adapter-aware image embeddings stored as FP16. |
 | `lora_adapter/<backbone-key>/` | Best candidate winner adapter and training metadata; `run.json` says whether the outer gate accepted it. |
+| `monitoring/baseline.json` | Task-aware training distribution and expected-performance reference used by drift detection. |
+| `monitoring/events.jsonl` | Append-only default drift observations when monitoring runs. |
+| `monitoring/update_history.jsonl` | Append-only champion/challenger decisions for incremental updates. |
+| `framework.json` | Compact public API context, class/feature names, preset, and lifecycle capabilities. |
+| `~/.autonexus/memory/` | Default local meta-memory; contains dataset embeddings and sanitized run metadata, never raw rows or images. |
 | `dist/*.whl` | Installable production wheel containing only declared production modules. |
 | `dist/*.tar.gz` | Source distribution generated by `uv build`. |
 
@@ -673,7 +774,10 @@ requires explicit approval for deleting the exact tracked set.
 | Calibration uses one internal split | Small datasets can produce noisy temperature estimates | Skip when data is insufficient; accept only non-worsening NLL. |
 | RAM peak is platform-dependent | Some platforms expose only current RSS | Manifest labels both current and peak; use container telemetry in production. |
 | VRAM metrics require CUDA Torch | CPU systems report N/A/zero | Expected and surfaced explicitly. |
-| No active FAISS retrieval/anti-memory | Search embedding is stored but does not transfer prior runs | Add only after a versioned, tested memory schema and measurable benchmark gain. |
+| Meta-memory is local retrieval, not automatic transfer | Neighbors are available, but blindly biasing model selection could amplify historical mistakes | Keep retrieval advisory until benchmarked routing and anti-memory penalties show consistent out-of-sample benefit. |
+| Default memory contribution is an operational policy choice | Sanitized run metadata may still be unsuitable for some regulated environments | Raw data and clear-text paths are excluded; use `contribute_memory=False` or an isolated `memory_dir`. |
+| Incremental learning is estimator-dependent | Tree ensembles and vision adapters cannot safely use generic `partial_fit` | Capability detection returns `retrain_required`; use the online SGD preset or an explicit challenger retrain. |
+| Automatic drift-triggered updates can react to transient shifts | A short-lived batch may not justify promotion | Require labels, a holdout gate, minimum batch sizes, monitoring thresholds, and human approval for high-risk systems. |
 | No image end-to-end CI fixture | Model downloads are too large for fast unit tests | Cache logic is isolated; add a mocked processor/model integration test. |
 | Joblib model loading executes Python objects | Untrusted model files are unsafe | Load only artifacts produced by trusted runs. |
 | XLS parsing adds an old-format dependency | Extra base dependency for a legacy format | Drop XLS if only modern XLSX is required. |
@@ -683,13 +787,16 @@ requires explicit approval for deleting the exact tracked set.
 The packaged runtime is production-oriented for local/batch AutoML:
 
 - Source compiles successfully.
-- The 14-test production suite passes, including grouped-CV, automatic
-  backbone-selection, and fallback regression tests.
+- The 21-test production suite passes, including framework lifecycle, local
+  memory, drift, mandatory artifacts, grouped CV, automatic backbone
+  selection, calibration, and executable notebook tests.
 - The installed CLI help works with no required target argument.
 - A synthetic end-to-end tabular run completes and writes model, metrics, and
   manifest artifacts with training/validation/testing metrics and RAM/VRAM.
 - `uv build` produces a valid wheel and source distribution.
-- The wheel contains only the production modules listed in Section 9.
+- The wheel contains 43 files: the production modules listed in Section 9,
+  the `autonexus` package, and distribution metadata. Historical prototypes
+  are absent.
 
 Repository cleanup is the remaining operational task. The runtime package is
 already isolated from the historical prototypes, but the repository itself
@@ -715,5 +822,5 @@ logistic control, validation-gated family diversity, early stopping, LoRA
 weight decay, and non-worsening temperature scaling.
 
 The production wheel is unified and verified. The old experimental stack has
-no runtime role and should be removed from the repository once deletion of the
-exact tracked set is approved.
+no runtime role and is excluded from installation; Section 12 records the
+remaining repository-only cleanup boundary separately from runtime readiness.

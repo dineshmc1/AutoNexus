@@ -109,6 +109,26 @@ REGRESSION_MODELS = {
     "gb_reg":      HistGradientBoostingRegressor(random_state=42),
 }  # 15 regression models
 
+_CUSTOM_MODELS: Dict[str, Dict[str, Any]] = {
+    "classification": {},
+    "regression": {},
+}
+
+
+def register_model(
+    name: str,
+    estimator: Any,
+    *,
+    problem_type: str = "classification",
+) -> None:
+    """Register a cloneable custom estimator for AutoNexus runs."""
+    if problem_type not in _CUSTOM_MODELS:
+        raise ValueError("problem_type must be classification or regression")
+    if not name or not isinstance(name, str):
+        raise ValueError("Custom model name must be a non-empty string.")
+    clone(estimator)
+    _CUSTOM_MODELS[problem_type][name] = estimator
+
 def _get_catalogue(
     problem_type: str,
     requested: Optional[List[str]] = None,
@@ -119,6 +139,7 @@ def _get_catalogue(
         if problem_type == "regression"
         else CLASSIFICATION_MODELS
     )
+    catalogue.update(_CUSTOM_MODELS[problem_type])
     wanted = set(requested or ["all"])
     load_all = "all" in wanted
 
@@ -233,6 +254,7 @@ def _train_and_evaluate(
     preprocessing_memory: Any = None,
     groups: Optional[np.ndarray] = None,
     random_state: int = 42,
+    diagnostics: Optional[Dict[str, Any]] = None,
 ) -> Tuple[float, Optional[Pipeline], float]:
     from sklearn.model_selection import (
         GroupKFold,
@@ -246,6 +268,7 @@ def _train_and_evaluate(
     from sklearn.pipeline import Pipeline
     import scipy.sparse
     
+    model_started = time.monotonic()
     cv_scores = []
     is_classification = problem_type == "classification"
     
@@ -382,6 +405,7 @@ def _train_and_evaluate(
     mean_score = float(np.mean(cv_scores))
     avg_fit_time = sum(fold_times) / len(fold_times) if fold_times else 0.0
     
+    refit_seconds = 0.0
     if cv_val > 1 and refit_full:
         print(f"  [Trainer] Refitting {name} on ALL data...")
         prepare_full = (
@@ -391,8 +415,29 @@ def _train_and_evaluate(
         )
         prep, X_prep = prepare_full(preprocessor, X, y)
         est = _configure_estimator(name, clone(estimator), y)
+        refit_started = time.monotonic()
         est.fit(X_prep, y)
+        refit_seconds = time.monotonic() - refit_started
         best_pipe = Pipeline([("preprocessor", prep), ("model", est)])
+
+    if diagnostics is not None:
+        observed_ram_mb = None
+        try:
+            import psutil
+
+            observed_ram_mb = psutil.Process().memory_info().rss / (1024**2)
+        except ImportError:
+            pass
+        diagnostics.update(
+            cv_mean=mean_score,
+            cv_std=float(np.std(cv_scores)),
+            cv_scores=[float(value) for value in cv_scores],
+            folds_completed=len(cv_scores),
+            average_fold_fit_seconds=avg_fit_time,
+            refit_seconds=refit_seconds,
+            total_seconds=time.monotonic() - model_started,
+            observed_process_ram_mb=observed_ram_mb,
+        )
         
     return mean_score, best_pipe, avg_fit_time
 
@@ -505,6 +550,7 @@ def full_train(
     preprocessing_cache_dir: Optional[str] = None,
     groups: Optional[np.ndarray] = None,
     random_state: int = 42,
+    diagnostics: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Tuple[Dict[str, Pipeline], Dict[str, float]]:
     # Train each model on the full training set with cross‑validation or single-split.
     trained: Dict[str, Pipeline] = {}
@@ -524,6 +570,7 @@ def full_train(
             print(f"[FullTrain] Time budget exhausted – skipping '{name}'.")
             break
 
+        model_diagnostics: Dict[str, Any] = {}
         try:
             mean_score, pipe, _ = _train_and_evaluate(
                 name, estimator, preprocessor, X, y, problem_type,
@@ -531,11 +578,14 @@ def full_train(
                 preprocessing_memory=preprocessing_memory,
                 groups=groups,
                 random_state=random_state,
+                diagnostics=model_diagnostics,
             )
         except Exception as exc:
             print(f"  [FullTrain] Skipping '{name}' after training failed: {exc}")
             continue
         if pipe is not None and mean_score > -float('inf'):
+            if diagnostics is not None:
+                diagnostics[name] = model_diagnostics
             scores[name] = mean_score
             trained[name] = pipe
             metric_name = "validation accuracy" if problem_type == "classification" else "validation score"

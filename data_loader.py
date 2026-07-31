@@ -24,6 +24,9 @@ class DataBundle:
     target_name: str
     metadata: dict[str, Any] = field(default_factory=dict)
     groups_train: pd.Series | None = None
+    groups_test: pd.Series | None = None
+    row_ids_train: pd.Series | None = None
+    row_ids_test: pd.Series | None = None
 
 
 def detect_problem_type(y: pd.Series, threshold: int = 10) -> str:
@@ -150,6 +153,11 @@ def load_dataset(
         f"{X_train.shape[1]} features."
     )
     print(f"[DataLoader] Problem type: {problem_type}")
+    class_names = (
+        [str(value) for value in sorted(df[target_col].astype(str).unique())]
+        if problem_type == "classification"
+        else []
+    )
     return DataBundle(
         X_train=X_train.reset_index(drop=True),
         X_test=X_test.reset_index(drop=True),
@@ -158,4 +166,11 @@ def load_dataset(
         problem_type=problem_type,
         feature_names=list(X_train.columns),
         target_name=target_col,
+        metadata={"class_names": class_names},
+        row_ids_train=pd.Series(
+            X_train.index.astype(str), name="source_row"
+        ).reset_index(drop=True),
+        row_ids_test=pd.Series(
+            X_test.index.astype(str), name="source_row"
+        ).reset_index(drop=True),
     )

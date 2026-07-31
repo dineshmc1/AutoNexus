@@ -62,7 +62,9 @@ class TemperatureScaledClassifier(BaseEstimator, ClassifierMixin):
 
     def predict_proba(self, X):
         probabilities = np.clip(
-            self.estimator.predict_proba(X), 1e-12, 1.0
+            _aligned_probabilities(self.estimator, X, self.classes_),
+            1e-12,
+            1.0,
         )
         logits = np.log(probabilities) / self.temperature
         logits -= logits.max(axis=1, keepdims=True)

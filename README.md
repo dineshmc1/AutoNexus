@@ -1,13 +1,30 @@
-# ML-Builder
+# AutoNexus
 
-ML-Builder is one CLI for leakage-safe AutoML on tabular files and labeled
-image folders. It performs resource-aware candidate screening, cross-validated
-training, optional tuning, validation-gated ensembling and calibration, final
-held-out testing, and artifact/report generation.
+AutoNexus is a developer-first AutoML framework and CLI for leakage-safe
+tabular and image learning. It combines resource-aware model search,
+cross-validated selection, reporting, drift monitoring, pluggable LLMs,
+streaming data sources, gated incremental updates, and a local model registry.
+
+Train in fewer than five lines:
+
+```python
+from autonexus import AutoNexus
+
+model = AutoNexus(preset="balanced").fit("data.csv", target="label")
+predictions = model.predict("unseen.csv")
+```
 
 ## Install
 
-Python 3.12 or newer and [uv](https://docs.astral.sh/uv/) are required.
+For a published distribution:
+
+```powershell
+pip install AutoNexus
+pip install "AutoNexus[vision,memory,monitoring]"
+```
+
+For local development, Python 3.12 or newer and
+[uv](https://docs.astral.sh/uv/) are required.
 
 ```powershell
 uv sync --extra dev
@@ -17,7 +34,7 @@ Install only the optional capabilities you need:
 
 ```powershell
 uv sync --extra boosting  # XGBoost and LightGBM
-uv sync --extra images    # Automatic vision backbones and LoRA
+uv sync --extra vision    # Automatic vision backbones and LoRA
 uv sync --extra explain   # SHAP
 uv sync --extra llm       # LiteLLM-backed Markdown explanations
 uv sync --extra all       # Every runtime capability
@@ -77,29 +94,74 @@ Useful options:
 uv run ml-builder data.csv --target label --models logistic,rf,gb --max-time 10m
 uv run ml-builder data.csv --target label --feature-engineering --tune
 uv run ml-builder data.csv --target label --shap
-uv run ml-builder data.csv --target label --no-report --no-llm --no-notebook
+uv run ml-builder data.csv --target label --no-report --no-llm
 uv run ml-builder images --backbones clip,dinov2,resnet
 uv run ml-builder images --backbones clip  # Disable backbone tournament
+uv run ml-builder data.csv --target label --no-contribute-memory
 uv run ml-builder --help
 ```
 
 ## Outputs
 
-Each run writes to `artifacts/` unless `--output-dir` is supplied:
+Every successful SDK or CLI run writes these contract artifacts to
+`artifacts/` unless another output directory is supplied:
 
-- `best_model.joblib`: fitted preprocessing and final estimator.
+- `model.pkl`: portable AutoNexus inference bundle with feature engineering,
+  preprocessing, label mapping, and the selected estimator.
+- `analysis.ipynb`: pre-training-first data and model investigation.
+- `report/explanation.md`: provider-generated or deterministic offline report.
+- `run.json`: model, label column, complete configuration, metrics, resources,
+  framework metadata, artifact paths, and memory-contribution result.
+- `search_profile.json`: versioned statistical and landmark dataset embedding.
+
+Additional outputs include:
+
+- `best_model.joblib`: fitted internal preprocessing and final estimator.
 - `metrics.csv`: final held-out metrics for the selected model.
-- `run.json`: reproducibility configuration, split metrics, timing, RAM, VRAM,
-  image representation decision, grouping, calibration, and ensemble metadata.
-- `search_profile.json`: versioned dataset/landmark search embedding.
-- `report/`: EDA plots, model explanations, `report.html`,
-  `explanation.md`, and `analysis.ipynb`.
+- `analysis_data/`: compact notebook inputs including the image audit,
+  prediction index, probabilities, embedding sample, model leaderboard,
+  split fingerprints, and reproducibility context.
+- `report/`: EDA plots, model explanations, `report.html`, and
+  `explanation.md`.
 - `.cache/`: split-aware image embeddings and fold preprocessing caches.
 - `lora_adapter/`: candidate adapter checkpoint when `--adapt-lora` is enabled;
   `run.json` records whether the validation gate accepted it.
 
 LLM reporting falls back to a deterministic local Markdown explanation when
 LiteLLM, a provider key, or network access is unavailable.
+
+Dataset meta-features contribute to local AutoNexus memory by default. Raw
+rows, images, and the clear-text dataset path are never contributed. Disable
+this per run with `contribute_memory=False` or `--no-contribute-memory`.
+
+## Framework Lifecycle
+
+```mermaid
+flowchart LR
+    Data[File, DataFrame, image folder, SQL, Kafka] --> Fit[AutoNexus.fit]
+    Fit --> Search[Unified search and validation]
+    Search --> Bundle[Mandatory run bundle]
+    Bundle --> Predict[Batch or API inference]
+    Bundle --> Monitor[Schema, feature, prediction, performance drift]
+    Monitor --> Gate{Labelled drift batch?}
+    Gate -->|partial_fit supported| Update[Gated incremental candidate]
+    Gate -->|otherwise| Retrain[Explicit challenger retrain]
+    Update --> Registry[Champion registry and rollback]
+    Retrain --> Registry
+```
+
+The SDK accepts callbacks and custom estimators. LLM reporting can use
+LiteLLM, Ollama, a local Transformers pipeline, any callable, or an arbitrary
+JSON HTTP adapter. Monitoring can emit logs, JSONL, webhooks, or Prometheus
+metrics. See `codes.md` for executable examples of every public workflow.
+
+The notebook checks every image for readability before training. Exact
+duplicates are checked across all same-size files; pixel-quality statistics
+and perceptual near-duplicate search use a deterministic, class-covering sample
+of at most 5,000 images. PCA, class-separation diagnostics, and learning curves
+use a similarly bounded representation sample. Every class still appears in
+the paginated representative-image gallery. UMAP runs when `umap-learn` is
+available and otherwise reports a clear optional-dependency message.
 
 ## Safety Boundaries
 

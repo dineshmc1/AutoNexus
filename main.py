@@ -75,6 +75,8 @@ class RunConfig:
     adapt_lora: bool
     backbones: list[str]
     backbone_time_seconds: float
+    contribute_memory: bool
+    memory_dir: Path | None
 
 
 def _positive_int(value: str) -> int:
@@ -192,7 +194,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--notebook", action=argparse.BooleanOptionalAction, default=True,
-        help="Generate a standalone analysis notebook",
+        help=(
+            "Compatibility flag; analysis.ipynb is mandatory for every "
+            "successful run"
+        ),
     )
     parser.add_argument(
         "--adapt-lora",
@@ -213,6 +218,17 @@ def build_parser() -> argparse.ArgumentParser:
         type=_duration,
         default=900.0,
         help="Cooperative time budget for automatic backbone search",
+    )
+    parser.add_argument(
+        "--contribute-memory",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Contribute run metadata to the local AutoNexus FAISS memory",
+    )
+    parser.add_argument(
+        "--memory-dir",
+        type=Path,
+        help="Override the local AutoNexus memory directory",
     )
     parser.add_argument(
         "--log-level", choices=("DEBUG", "INFO", "WARNING", "ERROR"),
@@ -323,6 +339,12 @@ def _config_from_args(args: argparse.Namespace) -> RunConfig:
         adapt_lora=args.adapt_lora,
         backbones=backbones,
         backbone_time_seconds=args.backbone_time,
+        contribute_memory=args.contribute_memory,
+        memory_dir=(
+            None
+            if args.memory_dir is None
+            else args.memory_dir.expanduser().resolve()
+        ),
     )
 
 
@@ -348,9 +370,14 @@ def _write_manifest(
     payload = asdict(config)
     payload["dataset"] = str(config.dataset)
     payload["output_dir"] = str(config.output_dir)
+    payload["memory_dir"] = (
+        None if config.memory_dir is None else str(config.memory_dir)
+    )
     payload.update(
         problem_type=problem_type,
         best_model=best_model,
+        model_used=best_model,
+        label_column=config.target,
         elapsed_seconds=round(elapsed_seconds, 3),
         run_summary=run_summary,
     )
@@ -469,6 +496,8 @@ def _load_image_dataset(config: RunConfig) -> tuple[DataBundle, pd.DataFrame]:
     split_method = "explicit-folders"
     development_groups: list[str] | None = None
     selected_development_groups: list[str] | None = None
+    selected_development_files: list[str] | None = None
+    test_groups: list[str] | None = None
     grouping_method = "explicit-folders"
     if explicit_split:
         train_files, train_labels = discover_labeled_files(
@@ -528,10 +557,125 @@ def _load_image_dataset(config: RunConfig) -> tuple[DataBundle, pd.DataFrame]:
             if all_groups is not None
             else None
         )
+        test_groups = (
+            [all_groups[index] for index in test_idx]
+            if all_groups is not None
+            else None
+        )
         print(
             f"[Split] {split_method} reserved {len(test_files)} untouched "
             f"test images; {len(development_files)} development images "
             f"(group inference: {grouping_method})."
+        )
+
+    from analytics_artifacts import audit_image_files
+
+    if explicit_split:
+        audit_files = train_files + val_files + test_files
+        audit_labels = train_labels + val_labels + test_labels
+        audit_splits = (
+            ["train"] * len(train_files)
+            + ["validation"] * len(val_files)
+            + ["test"] * len(test_files)
+        )
+    else:
+        audit_files = development_files + test_files
+        audit_labels = development_labels + test_labels
+        audit_splits = (
+            ["development_cv"] * len(development_files)
+            + ["test"] * len(test_files)
+        )
+    audit_groups = (
+        None
+        if development_groups is None and test_groups is None
+        else (
+            (development_groups or [None] * len(development_files))
+            + (test_groups or [None] * len(test_files))
+        )
+    )
+    inventory = audit_image_files(
+        audit_files,
+        audit_labels,
+        audit_splits,
+        audit_groups,
+        config.output_dir / "analysis_data",
+        random_state=config.random_state,
+    )
+    valid_files = set(inventory.loc[inventory["readable"], "path"].astype(str))
+    unreadable_count = int((~inventory["readable"]).sum())
+    if unreadable_count:
+        print(
+            f"[Data Audit] Excluding {unreadable_count} unreadable image(s); "
+            "details are recorded in analysis_data/data_index.csv."
+        )
+    duplicate_split_counts = (
+        inventory.loc[inventory["sha256"].ne("")]
+        .groupby("sha256")["split"]
+        .nunique()
+    )
+    duplicate_split_leaks = int((duplicate_split_counts > 1).sum())
+    if duplicate_split_leaks:
+        LOGGER.warning(
+            "%d exact-duplicate image group(s) cross split boundaries. "
+            "Treat final metrics as potentially optimistic and inspect the "
+            "notebook leakage audit.",
+            duplicate_split_leaks,
+        )
+
+    def keep_valid(
+        files: list[str],
+        labels: list[str],
+        groups: list[str] | None = None,
+    ) -> tuple[list[str], list[str], list[str] | None]:
+        positions = [
+            index
+            for index, filename in enumerate(files)
+            if str(Path(filename).resolve()) in valid_files
+        ]
+        return (
+            [files[index] for index in positions],
+            [labels[index] for index in positions],
+            (
+                None
+                if groups is None
+                else [groups[index] for index in positions]
+            ),
+        )
+
+    development_group_map = (
+        None
+        if development_groups is None
+        else dict(zip(development_files, development_groups))
+    )
+    development_files, development_labels, development_groups = keep_valid(
+        development_files, development_labels, development_groups
+    )
+    test_files, test_labels, test_groups = keep_valid(
+        test_files, test_labels, test_groups
+    )
+    if explicit_split:
+        explicit_train_groups = (
+            None
+            if development_group_map is None
+            else [development_group_map[filename] for filename in train_files]
+        )
+        explicit_val_groups = (
+            None
+            if development_group_map is None
+            else [development_group_map[filename] for filename in val_files]
+        )
+        train_files, train_labels, explicit_train_groups = keep_valid(
+            train_files, train_labels, explicit_train_groups
+        )
+        val_files, val_labels, explicit_val_groups = keep_valid(
+            val_files, val_labels, explicit_val_groups
+        )
+        development_files = train_files + val_files
+        development_labels = train_labels + val_labels
+        development_groups = (
+            None
+            if explicit_train_groups is None or explicit_val_groups is None
+            else explicit_train_groups + explicit_val_groups
         )
 
     cache_dir = config.output_dir / ".cache" / "embeddings"
@@ -651,6 +795,7 @@ def _load_image_dataset(config: RunConfig) -> tuple[DataBundle, pd.DataFrame]:
 
         if probe_groups is not None and gate_groups is not None:
             selected_development_groups = probe_groups + gate_groups
+        selected_development_files = probe_files + gate_files
 
         adapter_path = (
             config.output_dir / "lora_adapter" / selected_backbone.key
@@ -845,6 +990,7 @@ def _load_image_dataset(config: RunConfig) -> tuple[DataBundle, pd.DataFrame]:
             f"frozen-{selected_backbone.key}"
         )
         selected_development_groups = development_groups
+        selected_development_files = development_files
 
     image_metadata["embedding_and_gate_seconds"] = round(
         time.monotonic() - embedding_started
@@ -882,6 +1028,7 @@ def _load_image_dataset(config: RunConfig) -> tuple[DataBundle, pd.DataFrame]:
         )
 
     encoder = LabelEncoder().fit(labels)
+    image_metadata["class_names"] = encoder.classes_.astype(str).tolist()
     y = pd.Series(encoder.transform(labels), name="label")
     unseen = sorted(set(test_labels) - set(encoder.classes_))
     if unseen:
@@ -897,6 +1044,16 @@ def _load_image_dataset(config: RunConfig) -> tuple[DataBundle, pd.DataFrame]:
         target_name="label",
         metadata=image_metadata,
         groups_train=groups_train,
+        groups_test=(
+            None
+            if test_groups is None
+            else pd.Series(test_groups, name="image_group")
+        ),
+        row_ids_train=pd.Series(
+            selected_development_files or development_files,
+            name="image_path",
+        ),
+        row_ids_test=pd.Series(test_files, name="image_path"),
     )
     raw_df = pd.concat([X, X_test], ignore_index=True)
     raw_df["label"] = pd.concat(
@@ -1034,6 +1191,7 @@ def run(config: RunConfig) -> dict[str, Any]:
 
     fe_log: list[str] = []
     scaler_map = None
+    engineer = None
     X_train_final, X_test_final = X_train, X_test
     if config.feature_engineering:
         from feature_engineering import FeatureEngineer
@@ -1058,6 +1216,7 @@ def run(config: RunConfig) -> dict[str, Any]:
     preprocessor, _, _ = build_preprocessor(
         X_train_final, scaler_map=scaler_map, encoding_map=encoding_map
     )
+    training_diagnostics: dict[str, dict[str, Any]] = {}
     trained, validation_scores = full_train(
         promising,
         preprocessor,
@@ -1071,6 +1230,7 @@ def run(config: RunConfig) -> dict[str, Any]:
         ),
         groups=training_groups,
         random_state=config.random_state,
+        diagnostics=training_diagnostics,
     )
     if not trained:
         raise RuntimeError(
@@ -1162,6 +1322,19 @@ def run(config: RunConfig) -> dict[str, Any]:
 
     oob_score = _oob_score(best_model)
     save_model(trained[best_name], str(config.output_dir / "best_model.joblib"))
+    from nexus_predictor import NexusPredictor
+
+    predictor_artifact = NexusPredictor(
+        model=trained[best_name],
+        problem_type=bundle.problem_type,
+        target_name=bundle.target_name,
+        feature_names=list(X_train.columns),
+        class_names=list(bundle.metadata.get("class_names", [])),
+        feature_engineer=engineer,
+        modality="vision" if config.dataset.is_dir() else "tabular",
+        metadata=dict(bundle.metadata),
+    )
+    save_model(predictor_artifact, str(config.output_dir / "model.pkl"))
     save_metrics(results, str(config.output_dir / "metrics.csv"))
 
     plot_paths: list[str] = []
@@ -1272,74 +1445,89 @@ def run(config: RunConfig) -> dict[str, Any]:
     report_dir = config.output_dir / "report"
     markdown_path: str | None = None
     llm_started = time.monotonic()
-    if config.llm:
-        from llm_explainer import generate_comprehensive_report
+    from llm_explainer import generate_comprehensive_report
 
-        metric_row = results.loc[results["model"] == best_name].iloc[0]
-        llm_context = {
-            "dataset": {
-                "path": str(config.dataset),
-                "modality": "vision" if config.dataset.is_dir() else "tabular",
-                "samples": len(raw_df),
-                "features": len(bundle.feature_names),
-                "problem_type": bundle.problem_type,
-            },
-            "model": {"name": best_name},
-            "image_input": (
-                bundle.metadata if config.dataset.is_dir() else None
+    metric_row = results.loc[results["model"] == best_name].iloc[0]
+    llm_context = {
+        "dataset": {
+            "path": str(config.dataset),
+            "modality": "vision" if config.dataset.is_dir() else "tabular",
+            "samples": len(raw_df),
+            "features": len(bundle.feature_names),
+            "problem_type": bundle.problem_type,
+        },
+        "model": {"name": best_name},
+        "image_input": (
+            bundle.metadata if config.dataset.is_dir() else None
+        ),
+        "performance": {
+            "training": training_metric,
+            "validation": (
+                None if np.isnan(validation_metric) else validation_metric
             ),
-            "performance": {
-                "training": training_metric,
-                "validation": (
-                    None if np.isnan(validation_metric) else validation_metric
-                ),
-                "testing": testing_metric,
-                "held_out_metrics": {
-                    key: (
-                        None
-                        if pd.isna(value)
-                        else value.item()
-                        if hasattr(value, "item")
-                        else value
-                    )
-                    for key, value in metric_row.to_dict().items()
-                },
+            "testing": testing_metric,
+            "held_out_metrics": {
+                key: (
+                    None
+                    if pd.isna(value)
+                    else value.item()
+                    if hasattr(value, "item")
+                    else value
+                )
+                for key, value in metric_row.to_dict().items()
             },
-            "resources": summary,
-            "plots": plot_paths,
-        }
-        markdown_path = generate_comprehensive_report(
-            llm_context,
-            config.dataset.stem,
-            output_path=str(report_dir / "explanation.md"),
-            use_llm=True,
-        )
+        },
+        "resources": summary,
+        "plots": plot_paths,
+    }
+    markdown_path = generate_comprehensive_report(
+        llm_context,
+        config.dataset.stem,
+        output_path=str(report_dir / "explanation.md"),
+        use_llm=config.llm,
+    )
     llm_seconds = time.monotonic() - llm_started
+    summary["llm_seconds"] = round(llm_seconds, 3)
 
     notebook_path: str | None = None
     notebook_started = time.monotonic()
-    if config.notebook:
-        try:
-            from notebook_generator import generate_advanced_notebook
+    from analytics_artifacts import persist_run_analytics
+    from notebook_generator import generate_advanced_notebook
 
-            notebook_path = generate_advanced_notebook(
-                {
-                    "data_path": str(config.dataset),
-                    "modality": (
-                        "vision" if config.dataset.is_dir() else "tabular"
-                    ),
-                },
-                {
-                    "best_model": best_name,
-                    "summary": summary,
-                    "metrics_path": str(config.output_dir / "metrics.csv"),
-                    "model_path": str(config.output_dir / "best_model.joblib"),
-                    "plot_paths": plot_paths,
-                },
-                str(config.output_dir / "analysis.ipynb"),
-            )
-        except Exception as exc:
-            LOGGER.warning("Notebook generation failed: %s", exc)
+    analytics_paths = persist_run_analytics(
+        output_dir=config.output_dir,
+        config=config,
+        bundle=bundle,
+        best_name=best_name,
+        best_model=best_model,
+        X_train_final=X_train_final,
+        X_test_final=X_test_final,
+        y_train=y_train,
+        y_test=y_test,
+        results=results,
+        baseline_scores=baseline_scores,
+        validation_scores=validation_scores,
+        training_diagnostics=training_diagnostics,
+        summary=summary,
+    )
+    notebook_path = generate_advanced_notebook(
+        {
+            "data_path": str(config.dataset),
+            "modality": (
+                "vision" if config.dataset.is_dir() else "tabular"
+            ),
+            "problem_type": bundle.problem_type,
+        },
+        {
+            "best_model": best_name,
+            "summary": summary,
+            "metrics_path": str(config.output_dir / "metrics.csv"),
+            "model_path": str(config.output_dir / "model.pkl"),
+            "plot_paths": plot_paths,
+            "analytics_paths": analytics_paths,
+        },
+        str(config.output_dir / "analysis.ipynb"),
+    )
     notebook_seconds = time.monotonic() - notebook_started
 
     elapsed = time.monotonic() - started
@@ -1356,6 +1544,80 @@ def run(config: RunConfig) -> dict[str, Any]:
     manifest = _write_manifest(
         config, bundle.problem_type, best_name, elapsed, summary
     )
+    try:
+        from autonexus.memory import (
+            contribute_run,
+            contribution_to_dict,
+        )
+
+        memory_contribution = contribute_run(
+            config.output_dir,
+            enabled=config.contribute_memory,
+            memory_dir=config.memory_dir,
+        )
+        manifest_payload = json.loads(manifest.read_text(encoding="utf-8"))
+        manifest_payload["faiss_memory"] = contribution_to_dict(
+            memory_contribution
+        )
+        manifest_payload["artifact_contract"] = {
+            "run_json": str(manifest.resolve()),
+            "model_pkl": str((config.output_dir / "model.pkl").resolve()),
+            "analysis_ipynb": str(
+                (config.output_dir / "analysis.ipynb").resolve()
+            ),
+            "explanation_md": str(Path(markdown_path).resolve()),
+            "search_profile_json": str(
+                (config.output_dir / "search_profile.json").resolve()
+            ),
+        }
+        manifest.write_text(
+            json.dumps(manifest_payload, indent=2), encoding="utf-8"
+        )
+    except Exception as exc:
+        LOGGER.warning("FAISS memory contribution failed: %s", exc)
+        manifest_payload = json.loads(manifest.read_text(encoding="utf-8"))
+        manifest_payload["faiss_memory"] = {
+            "contributed": False,
+            "status": "failed",
+            "error": f"{type(exc).__name__}: {exc}",
+            "memory_dir": (
+                None if config.memory_dir is None else str(config.memory_dir)
+            ),
+        }
+        manifest_payload["artifact_contract"] = {
+            "run_json": str(manifest.resolve()),
+            "model_pkl": str((config.output_dir / "model.pkl").resolve()),
+            "analysis_ipynb": str(
+                (config.output_dir / "analysis.ipynb").resolve()
+            ),
+            "explanation_md": str(Path(markdown_path).resolve()),
+            "search_profile_json": str(
+                (config.output_dir / "search_profile.json").resolve()
+            ),
+        }
+        manifest.write_text(
+            json.dumps(manifest_payload, indent=2), encoding="utf-8"
+        )
+    analysis_context_path = (
+        config.output_dir / "analysis_data" / "run_context.json"
+    )
+    if analysis_context_path.is_file():
+        try:
+            analysis_context = json.loads(
+                analysis_context_path.read_text(encoding="utf-8")
+            )
+            analysis_context["summary"] = summary
+            analysis_context.setdefault("artifacts", {}).update(
+                notebook=notebook_path,
+                html_report=html_report_path,
+                markdown_explanation=markdown_path,
+                manifest=str(manifest.resolve()),
+            )
+            analysis_context_path.write_text(
+                json.dumps(analysis_context, indent=2), encoding="utf-8"
+            )
+        except (OSError, ValueError) as exc:
+            LOGGER.warning("Could not finalize notebook context: %s", exc)
     _display_results(results, bundle.problem_type)
     print(f"\nBest model: {best_name}")
     print("\nRun summary")
@@ -1434,6 +1696,7 @@ def run(config: RunConfig) -> dict[str, Any]:
             f"{bundle.metadata.get('selected_representation')}"
         )
     print(f"Artifacts: {config.output_dir}")
+    print(f"Model bundle: {config.output_dir / 'model.pkl'}")
     if html_report_path:
         print(f"HTML report: {html_report_path}")
     if markdown_path:
@@ -1448,6 +1711,15 @@ def run(config: RunConfig) -> dict[str, Any]:
         "results": results,
         "run_summary": summary,
         "output_dir": config.output_dir,
+        "artifacts": {
+            "run_json": manifest,
+            "model_pkl": config.output_dir / "model.pkl",
+            "analysis_ipynb": Path(notebook_path),
+            "explanation_md": Path(markdown_path),
+            "search_profile_json": (
+                config.output_dir / "search_profile.json"
+            ),
+        },
     }
 
 
