@@ -1,12 +1,16 @@
 [build-system]
-requires = ["setuptools>=69"]
+requires = ["setuptools>=77.0.3"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "AutoNexus"
-version = "1.0.0"
+version = "0.1.0"
+authors = [
+    { name = "Dinesh" },
+]
 description = "Developer-first automated ML, monitoring, drift, and online learning framework"
 readme = "README.md"
+license = "Apache-2.0"
 requires-python = ">=3.12"
 dependencies = [
     "joblib>=1.2",
@@ -16,6 +20,7 @@ dependencies = [
     "openpyxl>=3.0",
     "pandas>=1.5",
     "psutil>=5.9",
+    "rich>=14.0",
     "scikit-learn>=1.2",
     "scipy>=1.9",
     "seaborn>=0.12",
@@ -24,7 +29,11 @@ dependencies = [
 
 [project.optional-dependencies]
 boosting = ["lightgbm>=4", "xgboost>=2"]
-explain = ["shap>=0.42"]
+explain = [
+    "llvmlite>=0.43",
+    "numba>=0.60",
+    "shap>=0.42,<0.52",
+]
 vision = [
     "peft>=0.10",
     "pillow>=10",
@@ -53,13 +62,15 @@ all = [
     "kafka-python-ng>=2.2",
     "lightgbm>=4",
     "litellm>=1",
+    "llvmlite>=0.43",
+    "numba>=0.60",
     "opentelemetry-api>=1.24",
     "peft>=0.10",
     "pillow>=10",
     "prometheus-client>=0.20",
     "pyarrow>=16",
     "python-dotenv>=1",
-    "shap>=0.42",
+    "shap>=0.42,<0.52",
     "sqlalchemy>=2",
     "torch>=2",
     "tqdm>=4.66",

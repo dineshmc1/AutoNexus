@@ -22,8 +22,20 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from rich.logging import RichHandler
 from sklearn.metrics import accuracy_score, r2_score
 from sklearn.preprocessing import LabelEncoder
+
+from autonexus.cli_ui import (
+    ask,
+    console,
+    event,
+    phase,
+    render_banner,
+    render_final_dashboard,
+    render_launch,
+    render_results,
+)
 
 from data_cleaner import clean
 from data_loader import DataBundle, load_dataset
@@ -241,8 +253,8 @@ def _config_from_args(args: argparse.Namespace) -> RunConfig:
     dataset = args.dataset
     if dataset is None:
         try:
-            entered_path = input(
-                "Dataset path (CSV, Excel, or image folder): "
+            entered_path = ask(
+                "Dataset path  [nexus.muted](CSV, Excel, or image folder)[/]"
             ).strip()
         except EOFError as exc:
             raise ValueError(
@@ -284,15 +296,16 @@ def _config_from_args(args: argparse.Namespace) -> RunConfig:
         and dataset.name.lower() == "train"
         and (dataset.parent / "test").is_dir()
     ):
-        print(
-            f"[Input] Detected sibling train/test folders; using dataset "
-            f"root: {dataset.parent}"
+        event(
+            "input route",
+            f"Sibling train/test folders detected; root={dataset.parent}",
+            tone="blue",
         )
         dataset = dataset.parent
     target = args.target
     if dataset.is_file() and target is None:
         try:
-            target = input("Target column: ").strip()
+            target = ask("Target column").strip()
         except EOFError as exc:
             raise ValueError(
                 "Target column is required for tabular data."
@@ -349,14 +362,7 @@ def _config_from_args(args: argparse.Namespace) -> RunConfig:
 
 
 def _display_results(results: pd.DataFrame, problem_type: str) -> None:
-    preferred = (
-        ["model", "accuracy", "precision", "recall", "f1", "roc_auc"]
-        if problem_type == "classification"
-        else ["model", "rmse", "mae", "r2"]
-    )
-    columns = [column for column in preferred if column in results.columns]
-    print("\nModel results")
-    print(results[columns].round(4).to_string(index=False))
+    render_results(results, problem_type)
 
 
 def _write_manifest(
@@ -488,7 +494,11 @@ def _load_image_dataset(config: RunConfig) -> tuple[DataBundle, pd.DataFrame]:
         ) from exc
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"[Input] Detected image dataset ({image_count} files); device={device}.")
+    event(
+        "vision input",
+        f"{image_count} images detected / compute device={device}",
+        tone="blue",
+    )
     train_dir = config.dataset / "train"
     val_dir = config.dataset / "val"
     test_dir = config.dataset / "test"
@@ -518,10 +528,11 @@ def _load_image_dataset(config: RunConfig) -> tuple[DataBundle, pd.DataFrame]:
             development_labels,
             config.dataset,
         )
-        print(
-            f"[Split] Using folders: {len(development_files)} development, "
-            f"{len(test_files)} test images; development CV grouping: "
-            f"{grouping_method}."
+        event(
+            "split firewall",
+            f"{len(development_files)} development / {len(test_files)} test / "
+            f"grouping={grouping_method}",
+            tone="green",
         )
     else:
         all_files, all_labels = discover_labeled_files(
@@ -562,10 +573,11 @@ def _load_image_dataset(config: RunConfig) -> tuple[DataBundle, pd.DataFrame]:
             if all_groups is not None
             else None
         )
-        print(
-            f"[Split] {split_method} reserved {len(test_files)} untouched "
-            f"test images; {len(development_files)} development images "
-            f"(group inference: {grouping_method})."
+        event(
+            "split firewall",
+            f"{split_method} / {len(development_files)} development / "
+            f"{len(test_files)} sealed test / grouping={grouping_method}",
+            tone="green",
         )
 
     from analytics_artifacts import audit_image_files
@@ -604,9 +616,10 @@ def _load_image_dataset(config: RunConfig) -> tuple[DataBundle, pd.DataFrame]:
     valid_files = set(inventory.loc[inventory["readable"], "path"].astype(str))
     unreadable_count = int((~inventory["readable"]).sum())
     if unreadable_count:
-        print(
-            f"[Data Audit] Excluding {unreadable_count} unreadable image(s); "
-            "details are recorded in analysis_data/data_index.csv."
+        event(
+            "data audit",
+            f"{unreadable_count} unreadable images quarantined; see data_index.csv",
+            tone="amber",
         )
     duplicate_split_counts = (
         inventory.loc[inventory["sha256"].ne("")]
@@ -899,12 +912,13 @@ def _load_image_dataset(config: RunConfig) -> tuple[DataBundle, pd.DataFrame]:
             if adapter_selected
             else f"frozen-{selected_backbone.key}"
         )
-        print(
-            f"[LoRA Gate] frozen accuracy={frozen_scores['accuracy']:.4f}, "
-            f"adapted accuracy={adapted_scores['accuracy']:.4f}; "
-            f"frozen NLL={frozen_scores['nll']:.4f}, "
-            f"adapted NLL={adapted_scores['nll']:.4f}. "
-            f"Selected {selected_name}."
+        event(
+            "lora gate",
+            f"frozen={frozen_scores['accuracy']:.4f} / "
+            f"adapted={adapted_scores['accuracy']:.4f} / "
+            f"NLL {frozen_scores['nll']:.4f}->{adapted_scores['nll']:.4f} / "
+            f"selected={selected_name}",
+            tone="green" if adapter_selected else "blue",
         )
 
         if adapter_selected:
@@ -961,9 +975,10 @@ def _load_image_dataset(config: RunConfig) -> tuple[DataBundle, pd.DataFrame]:
                     f"'{selected_backbone.adaptation}', not transformer LoRA"
                 ),
             }
-            print(
-                f"[LoRA] Selected backbone {selected_backbone.key} does not "
-                "support q/v LoRA; keeping its frozen representation."
+            event(
+                "lora bypass",
+                f"{selected_backbone.key} has no q/v adapter path; frozen representation retained",
+                tone="amber",
             )
         embedder = UniversalEmbedder(
             device=device,
@@ -1090,6 +1105,7 @@ def _load_input(config: RunConfig) -> tuple[DataBundle, pd.DataFrame]:
 def run(config: RunConfig) -> dict[str, Any]:
     started = time.monotonic()
     config.output_dir.mkdir(parents=True, exist_ok=True)
+    phase(1, "Input Matrix", "validation / split firewall / representation")
     try:
         import torch
 
@@ -1118,6 +1134,7 @@ def run(config: RunConfig) -> dict[str, Any]:
         else bundle.groups_train.to_numpy()
     )
 
+    phase(2, "Candidate Search", "landmarking / shortlist / memory profile")
     decisions = ResourceManager().analyze(X_train, bundle.problem_type)
     cv = config.cv
     if decisions["size_category"] == "large":
@@ -1216,6 +1233,7 @@ def run(config: RunConfig) -> dict[str, Any]:
     preprocessor, _, _ = build_preprocessor(
         X_train_final, scaler_map=scaler_map, encoding_map=encoding_map
     )
+    phase(3, "Model Forge", "cross-validation / tuning / generalization gate")
     training_diagnostics: dict[str, dict[str, Any]] = {}
     trained, validation_scores = full_train(
         promising,
@@ -1275,16 +1293,17 @@ def run(config: RunConfig) -> dict[str, Any]:
         if generalization.ensemble_used:
             primary_cv_scope = "best-ensemble-member-reference"
         best_name = generalization.name
-        print(
-            f"[Generalization] Selected {best_name}; "
-            f"T={generalization.temperature:.3f}, "
-            + (
-                f"NLL {generalization.nll_before:.4f} -> "
-                f"{generalization.nll_after:.4f}."
-                if generalization.nll_before is not None
-                and generalization.nll_after is not None
-                else "calibration skipped (insufficient validation data)."
-            )
+        calibration_message = (
+            f"NLL {generalization.nll_before:.4f}->{generalization.nll_after:.4f}"
+            if generalization.nll_before is not None
+            and generalization.nll_after is not None
+            else "calibration skipped / insufficient validation data"
+        )
+        event(
+            "generalization",
+            f"selected={best_name} / T={generalization.temperature:.3f} / "
+            f"{calibration_message}",
+            tone="green",
         )
     else:
         best_name = max(
@@ -1339,6 +1358,7 @@ def run(config: RunConfig) -> dict[str, Any]:
 
     plot_paths: list[str] = []
     html_report_path: str | None = None
+    phase(4, "Evidence Layer", "analytics / explanations / reproducibility")
     report_started = time.monotonic()
     if config.report:
         try:
@@ -1618,93 +1638,116 @@ def run(config: RunConfig) -> dict[str, Any]:
             )
         except (OSError, ValueError) as exc:
             LOGGER.warning("Could not finalize notebook context: %s", exc)
+    phase(5, "Mission Complete", "validated model / sealed artifact bundle")
     _display_results(results, bundle.problem_type)
-    print(f"\nBest model: {best_name}")
-    print("\nRun summary")
-    print(
-        f"Fitted training {training_metric_name.split('_', 1)[1]} "
-        f"(diagnostic): {training_metric:.4f}"
+    metric_label = (
+        "ACCURACY" if bundle.problem_type == "classification" else "R2"
     )
-    validation_display = (
-        "N/A" if np.isnan(validation_metric) else f"{validation_metric:.4f}"
-    )
-    cv_scope_display = (
-        ", best ensemble-member reference"
-        if primary_cv_scope == "best-ensemble-member-reference"
-        else ""
-    )
-    print(
-        f"Cross-validated {validation_metric_name.split('_', 1)[1]} "
-        f"(primary{cv_scope_display}): {validation_display}"
-    )
-    print(
-        f"Held-out testing {testing_metric_name.split('_', 1)[1]}: "
-        f"{testing_metric:.4f}"
-    )
+    metric_rows = [
+        (f"FITTED TRAIN {metric_label}", f"{training_metric:.4f}", "nexus.value"),
+        (
+            f"CROSS-VALIDATED {metric_label}",
+            "N/A" if np.isnan(validation_metric) else f"{validation_metric:.4f}",
+            "nexus.green",
+        ),
+        (f"HELD-OUT TEST {metric_label}", f"{testing_metric:.4f}", "nexus.cyan"),
+    ]
     if not np.isnan(validation_metric):
-        print(
-            f"Fit-validation gap: {training_metric - validation_metric:+.4f}"
-        )
-        print(
-            f"Validation-test gap: {validation_metric - testing_metric:+.4f}"
+        fit_gap = training_metric - validation_metric
+        test_gap = validation_metric - testing_metric
+        metric_rows.extend(
+            [
+                (
+                    "FIT / CV GAP",
+                    f"{fit_gap:+.4f}",
+                    "nexus.green" if abs(fit_gap) <= 0.03 else "nexus.amber",
+                ),
+                (
+                    "CV / TEST GAP",
+                    f"{test_gap:+.4f}",
+                    "nexus.green" if abs(test_gap) <= 0.03 else "nexus.amber",
+                ),
+            ]
         )
     if generalization_gate_metric is not None:
-        print(
-            "Generalization gate accuracy: "
-            f"{generalization_gate_metric:.4f}"
+        metric_rows.append(
+            (
+                "GENERALIZATION GATE",
+                f"{generalization_gate_metric:.4f}",
+                "nexus.blue",
+            )
         )
     if oob_score is not None:
-        print(f"Out-of-bag accuracy: {oob_score:.4f}")
-    print("\nStage timings")
-    print(f"Input preparation:  {input_seconds:.1f}s")
+        metric_rows.append(("OUT-OF-BAG", f"{oob_score:.4f}", "nexus.blue"))
+
+    timing_rows = [
+        ("INPUT PREPARATION", f"{input_seconds:.1f}s", "nexus.value"),
+    ]
     backbone_search = bundle.metadata.get("backbone_search", {})
     if backbone_search.get("elapsed_seconds") is not None:
-        print(
-            "Backbone search:    "
-            f"{backbone_search['elapsed_seconds']:.1f}s"
+        timing_rows.append(
+            (
+                "BACKBONE SEARCH",
+                f"{backbone_search['elapsed_seconds']:.1f}s",
+                "nexus.value",
+            )
         )
     if bundle.metadata.get("lora_training_seconds") is not None:
-        print(
-            "LoRA training:      "
-            f"{bundle.metadata['lora_training_seconds']:.1f}s"
+        timing_rows.append(
+            (
+                "LORA TRAINING",
+                f"{bundle.metadata['lora_training_seconds']:.1f}s",
+                "nexus.value",
+            )
         )
     if bundle.metadata.get("embedding_and_gate_seconds") is not None:
-        print(
-            "Embedding + gate:   "
-            f"{bundle.metadata['embedding_and_gate_seconds']:.1f}s"
+        timing_rows.append(
+            (
+                "EMBEDDING + GATE",
+                f"{bundle.metadata['embedding_and_gate_seconds']:.1f}s",
+                "nexus.value",
+            )
         )
-    print(f"Downstream AutoML:  {training_seconds:.1f}s")
-    print(f"Plots/HTML report:  {reporting_seconds:.1f}s")
-    print(f"LLM explanation:    {llm_seconds:.1f}s")
-    print(f"Notebook:           {notebook_seconds:.1f}s")
-    print(
-        f"RAM usage: {_format_usage(usage['ram_current_mb'])} current, "
-        f"{_format_usage(usage['ram_peak_mb'])} peak"
+    timing_rows.extend(
+        [
+            ("DOWNSTREAM AUTOML", f"{training_seconds:.1f}s", "nexus.value"),
+            ("PLOTS / HTML", f"{reporting_seconds:.1f}s", "nexus.value"),
+            ("LLM EXPLANATION", f"{llm_seconds:.1f}s", "nexus.value"),
+            ("ANALYSIS NOTEBOOK", f"{notebook_seconds:.1f}s", "nexus.value"),
+        ]
     )
-    print(
-        f"VRAM usage: {_format_usage(usage['vram_current_mb'])} current, "
-        f"{_format_usage(usage['vram_peak_mb'])} peak"
-    )
-    if bundle.metadata.get("backbone"):
-        print(
-            "Vision backbone: "
-            f"{bundle.metadata.get('backbone_key')} "
-            f"({bundle.metadata['backbone']})"
-        )
-        print(
-            "Representation: "
-            f"{bundle.metadata.get('selected_representation')}"
-        )
-    print(f"Artifacts: {config.output_dir}")
-    print(f"Model bundle: {config.output_dir / 'model.pkl'}")
+
+    artifacts = [
+        ("MODEL", str(config.output_dir / "model.pkl")),
+        ("MANIFEST", str(manifest)),
+        ("ANALYTICS", str(notebook_path)),
+        ("REPORT", str(markdown_path)),
+        ("SEARCH", str(config.output_dir / "search_profile.json")),
+    ]
     if html_report_path:
-        print(f"HTML report: {html_report_path}")
-    if markdown_path:
-        print(f"Markdown explanation: {markdown_path}")
-    if notebook_path:
-        print(f"Notebook: {notebook_path}")
-    print(f"Manifest: {manifest}")
-    print(f"Completed in {elapsed:.1f}s")
+        artifacts.append(("HTML", str(html_report_path)))
+    render_final_dashboard(
+        best_model=best_name,
+        representation=bundle.metadata.get("selected_representation"),
+        metric_rows=metric_rows,
+        timing_rows=timing_rows,
+        resource_rows=[
+            (
+                "RAM CURRENT / PEAK",
+                f"{_format_usage(usage['ram_current_mb'])} / "
+                f"{_format_usage(usage['ram_peak_mb'])}",
+                "nexus.amber",
+            ),
+            (
+                "VRAM CURRENT / PEAK",
+                f"{_format_usage(usage['vram_current_mb'])} / "
+                f"{_format_usage(usage['vram_peak_mb'])}",
+                "nexus.blue",
+            ),
+        ],
+        artifacts=artifacts,
+        elapsed_seconds=elapsed,
+    )
     return {
         "best_model": best_name,
         "problem_type": bundle.problem_type,
@@ -1729,10 +1772,21 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     logging.basicConfig(
         level=getattr(logging, args.log_level),
-        format="%(levelname)s %(name)s: %(message)s",
+        format="%(message)s",
+        handlers=[
+            RichHandler(
+                console=console,
+                rich_tracebacks=True,
+                show_path=False,
+                markup=False,
+            )
+        ],
     )
     try:
-        run(_config_from_args(args))
+        render_banner()
+        config = _config_from_args(args)
+        render_launch(config)
+        run(config)
     except (FileNotFoundError, ValueError) as exc:
         parser.error(str(exc))
     except KeyboardInterrupt:

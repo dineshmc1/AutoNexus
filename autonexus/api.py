@@ -171,7 +171,7 @@ class AutoNexus:
         )
         manifest.update(
             framework="AutoNexus",
-            framework_version="1.0.0",
+            framework_version="0.1.0",
             label_column=target,
             model_used=manifest.get("best_model"),
             contribute_memory=config.contribute_memory,
