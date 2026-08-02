@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import importlib
 import json
+import subprocess
+import sys
 
 import numpy as np
 import pandas as pd
@@ -32,7 +34,18 @@ def _classification_frame(rows: int = 100) -> pd.DataFrame:
 def test_capitalized_import_shim_exposes_framework():
     module = importlib.import_module("AutoNexus")
 
+    assert module is importlib.import_module("autonexus")
     assert module.AutoNexus is AutoNexus
+
+
+def test_capitalized_import_first_uses_canonical_submodules():
+    command = (
+        "import AutoNexus, autonexus; "
+        "assert AutoNexus.AutoNexus is autonexus.AutoNexus; "
+        "assert AutoNexus.AutoNexus.__module__ == 'autonexus.api'"
+    )
+
+    subprocess.run([sys.executable, "-c", command], check=True)
 
 
 def test_drift_detector_finds_schema_and_feature_shift():

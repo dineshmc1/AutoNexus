@@ -10,9 +10,10 @@ training engine:
 
 The current package metadata declares version `0.1.0`, author `Dinesh`, and
 the SPDX license expression `Apache-2.0`. The canonical, cross-platform Python
-import is `from autonexus import AutoNexus`. The optional capitalized
-`import AutoNexus` compatibility shim is not currently reliable on Windows;
-Section 14 records the case-insensitive import collision and release action.
+import is `from autonexus import AutoNexus`. The capitalized `import AutoNexus`
+compatibility path is also supported: package initialization aliases both
+spellings before loading canonical `autonexus.*` submodules, preventing
+duplicate class identities on case-insensitive filesystems.
 
 It accepts:
 
@@ -589,7 +590,7 @@ These are the modules explicitly included in the wheel by `pyproject.toml`.
 | `analytics_artifacts.py` | Audits images before training and persists bounded predictions, probabilities, embeddings, leaderboards, fingerprints, versions, hardware, and notebook context. |
 | `notebook_generator.py` | Writes the pre-training-first investigation notebook with data quality, split, image, embedding, tournament, model, error, calibration, learning-curve, group, explainability, reproducibility, and model-card sections. |
 | `nexus_predictor.py` | Serializable inference boundary that keeps feature engineering, the fitted model, label mapping, modality, and metadata together in `model.pkl`. |
-| `AutoNexus.py` | Intended compatibility shim for `import AutoNexus`. On Windows, case-insensitive resolution currently collides with the lowercase `autonexus` package; use the canonical `from autonexus import AutoNexus` import until the shim strategy is fixed or removed. |
+| `AutoNexus.py` | Compatibility shim for `import AutoNexus`; `autonexus/__init__.py` canonicalizes both package spellings before submodule imports so Windows and case-sensitive platforms expose the same framework classes. |
 | `autonexus/__init__.py` | Curated public API and framework version. |
 | `autonexus/api.py` | High-level fit/load facade, DataFrame/source materialization, callbacks, framework metadata, drift-baseline creation, and custom LLM reporting. |
 | `autonexus/config.py` | Frozen public configuration, duration parsing, presets, overrides, and translation to the unified `RunConfig`. |
@@ -613,7 +614,7 @@ These are the modules explicitly included in the wheel by `pyproject.toml`.
 | `README.md` | Publication-quality project overview with abstract, architecture, methodology, API/CLI usage, artifact contract, qualified case-study results, limitations, future work, references, and license status. |
 | `understanding.md` | This architecture and operational reference. |
 | `codes.md` | Copy-ready SDK, CLI, monitoring, streaming, update, registry, serving, memory, and LLM examples. |
-| `LICENSE` | Required root Apache-2.0 license text. It is currently missing and must be added before public distribution. |
+| `LICENSE` | Required root Apache-2.0 license text. The current path is a directory containing `LICENCE-2.0.txt`; it must be replaced by a regular root file named exactly `LICENSE` before building. |
 | `.python-version` | Pins the local Python line to 3.12. |
 | `.env.example` | Safe template for LiteLLM model/provider configuration; it contains no real secret. |
 | `.gitignore` | Excludes datasets, secrets, environments, caches, builds, models, and run artifacts. |
@@ -775,9 +776,8 @@ ignore rules prevent equivalent new files from being added accidentally.
 |---|---|---|
 | Legacy files remain in the Git worktree | Confuses maintainers and expands attack/dependency surface | Excluded from wheel; delete exact approved set. |
 | `.gitconfig` contains personal identity | Privacy and machine-specific configuration risk | Remove it from version control before publishing the repository. |
-| Capitalized import collides on case-insensitive filesystems | `import AutoNexus` resolves to the lowercase package on Windows, breaking the identity assertion in `tests/test_framework.py` | Treat `from autonexus import AutoNexus` as canonical; remove the capitalized shim or redesign compatibility without a case-only name, then restore a 21/21 test pass. |
-| Root Apache-2.0 license text is missing | The SPDX metadata declares a license, but the repository and distributions do not yet carry the complete legal text | Add `LICENSE` and configure `license-files = ["LICENSE"]` before the public release. |
-| Git remote still targets `dineshmc1/ML-Builder` | Pushes and release links can target the renamed repository incorrectly | Set `origin` to `https://github.com/dineshmc1/AutoNexus.git` and verify fetch/push URLs. |
+| Capitalized compatibility requires early aliasing | Without package-name canonicalization, Windows can load duplicate classes under `AutoNexus.*` and `autonexus.*` | Both names are registered before canonical submodule imports; tests cover canonical-first and capitalized-first import order. |
+| Apache license has the wrong filesystem shape | `license-files = ["LICENSE"]` targets a regular file, but `LICENSE` is currently a directory containing `LICENCE-2.0.txt` | Move the complete text to a root file named exactly `LICENSE` and remove the empty directory before building. |
 | Existing `0.1.0` distributions are stale | The wheel and sdist predate the current README and latest metadata, so uploading them would publish outdated contents | Delete or ignore the old build outputs, rebuild from the release commit, and validate the exact two new files with Twine. |
 | `--max-time` is cooperative | A single estimator fit can exceed the budget | Documented; hard isolation would require subprocess workers. |
 | Image models download on first use | Offline image runs fail without a local model cache | Actionable dependency/runtime error; pre-provision models in deployment. |
@@ -804,34 +804,31 @@ but the repository is not yet ready for the public `0.1.0` release.
 
 Verification on 2026-08-02 produced this exact status:
 
-- Pytest collected 21 production tests: 20 passed and 1 failed.
+- Pytest collected 22 production tests: all 22 passed.
 - Framework lifecycle, drift, local memory, mandatory artifacts, grouped image
   splitting, backbone selection/fallback logic, calibration, and executable
   notebook tests passed.
-- `tests/test_framework.py::test_capitalized_import_shim_exposes_framework`
-  failed on Windows because `import AutoNexus` resolved through the
-  case-insensitive lowercase package path instead of the intended top-level
-  compatibility module.
+- Framework tests now cover both canonical-first and capitalized-first imports;
+  both expose the canonical `autonexus.api.AutoNexus` class on Windows.
 - Prior CLI, synthetic tabular, wheel, and source-distribution checks completed,
   but the current documentation/package state has not been rebuilt and
   revalidated as a clean release candidate.
 
 Release blockers, in order:
 
-1. Fix or remove the case-only `AutoNexus.py` compatibility strategy and obtain
-   a clean 21/21 test result on Windows.
-2. Add the complete Apache-2.0 `LICENSE` file and include it in distribution
-   metadata.
-3. Change `origin` from `dineshmc1/ML-Builder` to
-   `dineshmc1/AutoNexus`.
-4. Remove tracked generated artifacts, personal Git configuration, and the
+1. Replace the `LICENSE/` directory with a regular root `LICENSE` file
+   containing the complete Apache-2.0 text.
+2. Remove tracked personal Git configuration, redundant requirements, and the
    approved legacy prototype set from the public repository.
-5. Rebuild from a clean release commit, run `twine check` on the exact wheel
+3. Commit and push the import fix and release cleanup.
+4. Remove stale files from `dist/`, rebuild from the clean release commit, run
+   `twine check` on the exact wheel
    and sdist, and validate installation from TestPyPI in a fresh environment.
 
 The production package boundary is already isolated from the historical
-prototypes. The remaining work is release hygiene, one cross-platform import
-defect, and clean end-to-end distribution verification.
+prototypes, the Git remote points to `dineshmc1/AutoNexus`, and the complete
+test suite is green. The remaining work is release hygiene and clean
+end-to-end distribution verification.
 
 ## 16. Summary
 
@@ -854,5 +851,5 @@ weight decay, and non-worsening temperature scaling.
 
 The production runtime is unified, and the old experimental stack has no
 runtime role in the declared distribution. Public release should wait until
-the cross-platform import test, license file, repository remote/cleanup, and
-fresh distribution verification items in Section 15 are complete.
+the license path, repository cleanup, release commit, and fresh distribution
+verification items in Section 15 are complete.

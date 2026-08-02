@@ -1,10 +1,10 @@
-"""Production command-line entry point for ML-Builder.
+"""Production command-line entry point for AutoNexus.
 
 Examples:
     python main.py data.csv --target outcome
     python main.py --target outcome
     python main.py data.xlsx --target price --problem-type regression --tune
-    ml-builder data.csv --target label --models logistic,rf,gb --report
+    autonexus data.csv --target label --models logistic,rf,gb --report
 """
 
 from __future__ import annotations
@@ -126,7 +126,7 @@ def _duration(value: str) -> float:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="ml-builder",
+        prog="autonexus",
         description="Train and evaluate tabular or image ML from one command.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
@@ -134,7 +134,7 @@ def build_parser() -> argparse.ArgumentParser:
         "dataset",
         type=Path,
         nargs="?",
-        help="CSV or Excel dataset path; prompted for when omitted",
+        help="CSV or Excel file, or image folder; prompted when omitted",
     )
     parser.add_argument(
         "--target",
