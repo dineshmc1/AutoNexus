@@ -11,6 +11,7 @@ authors = [
 description = "Developer-first automated ML, monitoring, drift, and online learning framework"
 readme = "README.md"
 license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
     "joblib>=1.2",
@@ -26,6 +27,10 @@ dependencies = [
     "seaborn>=0.12",
     "xlrd>=2",
 ]
+[project.urls]
+Homepage = "https://github.com/dineshmc1/AutoNexus"
+Repository = "https://github.com/dineshmc1/AutoNexus"
+Issues = "https://github.com/dineshmc1/AutoNexus/issues"
 
 [project.optional-dependencies]
 boosting = ["lightgbm>=4", "xgboost>=2"]
