@@ -2,11 +2,31 @@
 
 from __future__ import annotations
 
+import sys
+
 import numpy as np
 from sklearn.linear_model import LogisticRegression
 
 from generalization import TemperatureScaledClassifier
-from main import _config_from_args, build_parser
+from main import _config_from_args, _configure_stdio, build_parser
+
+
+def test_stdio_is_reconfigured_for_windows_sdk_runs(monkeypatch):
+    calls = []
+
+    class Stream:
+        def reconfigure(self, **options):
+            calls.append(options)
+
+    monkeypatch.setattr(sys, "stdout", Stream())
+    monkeypatch.setattr(sys, "stderr", Stream())
+
+    _configure_stdio()
+
+    assert calls == [
+        {"encoding": "utf-8", "errors": "replace"},
+        {"encoding": "utf-8", "errors": "replace"},
+    ]
 
 
 def test_cli_allows_interactive_dataset_and_target():

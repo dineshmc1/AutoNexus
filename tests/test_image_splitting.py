@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
+import pytest
 from sklearn.compose import ColumnTransformer
 from sklearn.linear_model import LogisticRegression
 
@@ -224,3 +225,26 @@ def test_backbone_finalization_falls_back_to_clip():
 
     assert selection.spec.key == "clip"
     assert selection.metrics["fallback_used"] == "clip"
+
+
+def test_clip_model_output_is_normalized_to_tensor():
+    torch = pytest.importorskip("torch")
+    from multimodal_extractor import extract_vision_features
+
+    class Processor:
+        def __call__(self, *, images, return_tensors):
+            assert images == ["image"]
+            assert return_tensors == "pt"
+            return {"pixel_values": torch.ones((1, 3, 2, 2))}
+
+    class ClipModel:
+        def get_image_features(self, **inputs):
+            assert "pixel_values" in inputs
+            return SimpleNamespace(pooler_output=torch.ones((1, 8)))
+
+    features = extract_vision_features(
+        ClipModel(), Processor(), ["image"], torch.device("cpu")
+    )
+
+    assert torch.is_tensor(features)
+    assert tuple(features.shape) == (1, 8)

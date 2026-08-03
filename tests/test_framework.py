@@ -6,6 +6,7 @@ import importlib
 import json
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -132,3 +133,86 @@ def test_five_line_training_artifacts_inference_monitoring_and_update(tmp_path):
         "search_profile.json",
     ):
         assert (registered.path / relative).is_file()
+
+
+def test_vision_fit_recovers_legacy_embedding_before_completion(
+    tmp_path, monkeypatch
+):
+    import autonexus.api as api_module
+    import main as main_module
+
+    image_dir = tmp_path / "images" / "class-a"
+    image_dir.mkdir(parents=True)
+    output = tmp_path / "run"
+    feature_names = ["embedding_0000", "embedding_0001"]
+    completion_calls = []
+
+    class FakeModel:
+        def __init__(self, output_dir, callbacks=None):
+            del callbacks
+            self.output_dir = output_dir
+            self.manifest_path = output_dir / "run.json"
+            self.manifest = json.loads(
+                self.manifest_path.read_text(encoding="utf-8")
+            )
+            self.predictor = SimpleNamespace(
+                feature_names=feature_names,
+                class_names=["class-a", "class-b"],
+            )
+
+        @property
+        def problem_type(self):
+            return "classification"
+
+        @property
+        def best_model(self):
+            return "logistic"
+
+        @property
+        def supports_incremental_learning(self):
+            return False
+
+        @property
+        def artifacts(self):
+            return {"run": self.manifest_path}
+
+    def fake_run(config, *, render_completion=True):
+        assert render_completion is False
+        analysis_dir = config.output_dir / "analysis_data"
+        analysis_dir.mkdir(parents=True)
+        (config.output_dir / "run.json").write_text(
+            json.dumps(
+                {
+                    "best_model": "logistic",
+                    "run_summary": {"held_out_testing_metric": 0.5},
+                }
+            ),
+            encoding="utf-8",
+        )
+        np.savez_compressed(
+            analysis_dir / "embedding_sample.npz",
+            X=np.ones((4, 2), dtype=np.float16),
+            feature_names=np.asarray(feature_names, dtype=object),
+        )
+        return {"_completion_dashboard": {"run": "complete"}}
+
+    def fake_render_completion(payload):
+        assert payload == {"run": "complete"}
+        assert (output / "framework.json").is_file()
+        assert (output / "monitoring" / "baseline.json").is_file()
+        completion_calls.append(payload)
+
+    monkeypatch.setattr(api_module, "NexusModel", FakeModel)
+    monkeypatch.setattr(main_module, "run", fake_run)
+    monkeypatch.setattr(
+        main_module, "render_run_completion", fake_render_completion
+    )
+
+    model = AutoNexus(
+        output_dir=output,
+        llm=False,
+        contribute_memory=False,
+    ).fit(image_dir.parent)
+
+    assert isinstance(model, FakeModel)
+    assert completion_calls == [{"run": "complete"}]

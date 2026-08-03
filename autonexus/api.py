@@ -18,6 +18,26 @@ from .model import NexusModel
 from .plugins import plugins
 
 
+def _load_embedding_representation(
+    path: Path, fallback_names: Iterable[str]
+) -> pd.DataFrame:
+    """Load a safe numeric representation, including legacy 0.1.0 bundles."""
+    with np.load(path, allow_pickle=False) as embedding:
+        values = embedding["X"].astype(np.float32)
+        try:
+            feature_names = embedding["feature_names"].astype(str).tolist()
+        except (KeyError, TypeError, ValueError):
+            # AutoNexus 0.1.0 accidentally persisted this field as an object
+            # array. Never enable pickle for an artifact that may be untrusted.
+            feature_names = [str(name) for name in fallback_names]
+
+    if len(feature_names) != values.shape[1]:
+        feature_names = [
+            f"embedding_{index:04d}" for index in range(values.shape[1])
+        ]
+    return pd.DataFrame(values, columns=feature_names)
+
+
 class AutoNexus:
     """Train production ML models with a compact, customizable API."""
 
@@ -118,15 +138,20 @@ class AutoNexus:
             target=target,
             output_dir=str(output_dir),
         )
-        from main import run
+        from main import render_run_completion, run
 
-        result = run(config.to_run_config(dataset, target))
+        result = run(
+            config.to_run_config(dataset, target), render_completion=False
+        )
         model = NexusModel(output_dir, callbacks=self.callbacks)
         self._write_framework_metadata(
             model, frame=frame, target=target, config=config
         )
         if self.llm_provider is not None:
             self._write_custom_llm_report(model)
+        completion = result.pop("_completion_dashboard", None)
+        if completion is not None:
+            render_run_completion(completion)
         self.callbacks.emit(
             "training_completed",
             best_model=model.best_model,
@@ -171,7 +196,7 @@ class AutoNexus:
         )
         manifest.update(
             framework="AutoNexus",
-            framework_version="0.1.0",
+            framework_version="0.1.1",
             label_column=target,
             model_used=manifest.get("best_model"),
             contribute_memory=config.contribute_memory,
@@ -203,16 +228,11 @@ class AutoNexus:
                     .items()
                 }
         else:
-            embedding = np.load(
+            representation = _load_embedding_representation(
                 model.output_dir
                 / "analysis_data"
                 / "embedding_sample.npz",
-                allow_pickle=False,
-            )
-            feature_names = embedding["feature_names"].astype(str)
-            representation = pd.DataFrame(
-                embedding["X"].astype(np.float32),
-                columns=feature_names,
+                model.predictor.feature_names,
             )
             baseline = DriftBaseline.from_frame(
                 representation,

@@ -149,6 +149,9 @@ def test_persisted_classification_bundle_supports_notebook_cells(tmp_path):
     assert Path(paths["probabilities"]).is_file()
     assert Path(paths["leaderboard"]).is_file()
     assert Path(paths["run_context"]).is_file()
+    with np.load(paths["embedding_sample"], allow_pickle=False) as embedding:
+        feature_names = embedding["feature_names"]
+        assert feature_names.dtype.kind in {"U", "S"}
 
     notebook_path = tmp_path / "analysis.ipynb"
     generate_advanced_notebook(

@@ -152,6 +152,22 @@ def multimodal_collate(batch):
     return list(images), list(labels)
 
 
+def _vision_output_tensor(output):
+    """Normalize tensors and Transformers model outputs to one feature tensor."""
+    if torch.is_tensor(output):
+        return output
+    for attribute in ("image_embeds", "pooler_output", "last_hidden_state"):
+        candidate = getattr(output, attribute, None)
+        if candidate is None:
+            continue
+        if not torch.is_tensor(candidate):
+            return _vision_output_tensor(candidate)
+        return candidate[:, 0] if attribute == "last_hidden_state" else candidate
+    if isinstance(output, (tuple, list)) and output:
+        return _vision_output_tensor(output[0])
+    raise RuntimeError("Backbone output has no supported image feature tensor.")
+
+
 def extract_vision_features(model, processor, images, device):
     """Return one feature tensor for CLIP, ViT-style, or CNN backbones."""
     inputs = processor(images=images, return_tensors="pt")
@@ -171,22 +187,10 @@ def extract_vision_features(model, processor, images, device):
             feature_model = wrapped_model
 
     if hasattr(feature_model, "get_image_features"):
-        features = feature_model.get_image_features(**inputs)
+        output = feature_model.get_image_features(**inputs)
     else:
-        outputs = model(**inputs)
-        image_embeds = getattr(outputs, "image_embeds", None)
-        pooler_output = getattr(outputs, "pooler_output", None)
-        last_hidden_state = getattr(outputs, "last_hidden_state", None)
-        if image_embeds is not None:
-            features = image_embeds
-        elif pooler_output is not None:
-            features = pooler_output
-        elif last_hidden_state is not None:
-            features = last_hidden_state[:, 0]
-        else:
-            raise RuntimeError(
-                "Backbone output has no supported image feature tensor."
-            )
+        output = model(**inputs)
+    features = _vision_output_tensor(output)
     return features.flatten(start_dim=1) if features.ndim > 2 else features
 
 

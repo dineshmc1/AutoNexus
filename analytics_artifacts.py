@@ -467,7 +467,9 @@ def persist_run_analytics(
         split=all_splits[sample_indices],
         group=all_groups[sample_indices],
         row_id=all_row_ids[sample_indices],
-        feature_names=np.asarray(all_embeddings.columns.astype(str)),
+        feature_names=np.asarray(
+            all_embeddings.columns.astype(str).tolist(), dtype=np.str_
+        ),
         source_count=np.asarray(len(all_embeddings)),
     )
 

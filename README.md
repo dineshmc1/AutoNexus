@@ -16,7 +16,7 @@ model = AutoNexus(preset="balanced").fit("data.csv", target="label")
 predictions = model.predict("unseen.csv")
 ```
 
-> **Project status:** AutoNexus is version `0.1.0`. The packaged runtime is
+> **Project status:** AutoNexus is version `0.1.1`. The packaged runtime is
 > designed for local and batch experimentation, but users should independently
 > validate models, data splits, licenses, and operational controls before
 > deploying them in high-risk environments.
@@ -113,7 +113,7 @@ subject, video-folder, or frame-sequence groups. Reliable groups remain
 disjoint; otherwise, the system uses a stratified image split.
 
 Audio, video, text, executable-file analysis, neural architecture search, and
-distributed multi-node training are outside the packaged `0.1.0` runtime.
+distributed multi-node training are outside the packaged `0.1.1` runtime.
 
 ## System Architecture
 
@@ -797,7 +797,7 @@ Build and validate the distribution:
 
 ```bash
 uv build
-uvx twine check dist/autonexus-0.1.0-py3-none-any.whl dist/autonexus-0.1.0.tar.gz
+uvx twine check dist/autonexus-0.1.1-py3-none-any.whl dist/autonexus-0.1.1.tar.gz
 ```
 
 The tests cover the public framework lifecycle, mandatory artifacts, drift,

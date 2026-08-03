@@ -8,7 +8,7 @@ training engine:
 - `autonexus.AutoNexus` is the compact SDK used by applications.
 - `main.py`, `autonexus`, and `ml-builder` expose the same engine as a CLI.
 
-The current package metadata declares version `0.1.0`, author `Dinesh`, and
+The current package metadata declares version `0.1.1`, author `Dinesh`, and
 the SPDX license expression `Apache-2.0`. The canonical, cross-platform Python
 import is `from autonexus import AutoNexus`. The capitalized `import AutoNexus`
 compatibility path is also supported: package initialization aliases both
@@ -31,9 +31,8 @@ Every successful run has a strict artifact contract: `run.json`, `model.pkl`,
 `analysis.ipynb`, `report/explanation.md`, and `search_profile.json`.
 The production distribution is explicitly declared in `pyproject.toml`.
 Historical W&B, agentic, and NAS prototypes are not imported and are excluded
-from that distribution boundary. Existing `0.1.0` build artifacts predate the
-current publication README and package metadata, so they are not the final
-release artifacts and must be rebuilt before upload.
+from that distribution boundary. Version `0.1.0` is the first public PyPI
+release; `0.1.1` is the compatibility and artifact-finalization patch release.
 
 ## 2. System Boundary
 
@@ -609,12 +608,12 @@ These are the modules explicitly included in the wheel by `pyproject.toml`.
 
 | File | Meaning |
 |---|---|
-| `pyproject.toml` | Canonical `AutoNexus` `0.1.0` metadata, author, Apache-2.0 SPDX declaration, base/optional dependencies, console entrypoints, explicit wheel module list, and pytest settings. |
+| `pyproject.toml` | Canonical `AutoNexus` `0.1.1` metadata, author, Apache-2.0 SPDX declaration, base/optional dependencies, console entrypoints, explicit wheel module list, and pytest settings. |
 | `uv.lock` | Exact reproducible dependency resolution for base and optional extras. |
 | `README.md` | Publication-quality project overview with abstract, architecture, methodology, API/CLI usage, artifact contract, qualified case-study results, limitations, future work, references, and license status. |
 | `understanding.md` | This architecture and operational reference. |
 | `codes.md` | Copy-ready SDK, CLI, monitoring, streaming, update, registry, serving, memory, and LLM examples. |
-| `LICENSE` | Required root Apache-2.0 license text. The current path is a directory containing `LICENCE-2.0.txt`; it must be replaced by a regular root file named exactly `LICENSE` before building. |
+| `LICENSE` | Complete Apache-2.0 license text in the regular root file required by the distribution metadata. |
 | `.python-version` | Pins the local Python line to 3.12. |
 | `.env.example` | Safe template for LiteLLM model/provider configuration; it contains no real secret. |
 | `.gitignore` | Excludes datasets, secrets, environments, caches, builds, models, and run artifacts. |
@@ -777,8 +776,7 @@ ignore rules prevent equivalent new files from being added accidentally.
 | Legacy files remain in the Git worktree | Confuses maintainers and expands attack/dependency surface | Excluded from wheel; delete exact approved set. |
 | `.gitconfig` contains personal identity | Privacy and machine-specific configuration risk | Remove it from version control before publishing the repository. |
 | Capitalized compatibility requires early aliasing | Without package-name canonicalization, Windows can load duplicate classes under `AutoNexus.*` and `autonexus.*` | Both names are registered before canonical submodule imports; tests cover canonical-first and capitalized-first import order. |
-| Apache license has the wrong filesystem shape | `license-files = ["LICENSE"]` targets a regular file, but `LICENSE` is currently a directory containing `LICENCE-2.0.txt` | Move the complete text to a root file named exactly `LICENSE` and remove the empty directory before building. |
-| Existing `0.1.0` distributions are stale | The wheel and sdist predate the current README and latest metadata, so uploading them would publish outdated contents | Delete or ignore the old build outputs, rebuild from the release commit, and validate the exact two new files with Twine. |
+| Version `0.1.0` vision finalization can raise after successful training | Object-typed NPZ feature names are rejected by NumPy's safe loader, leaving framework and drift metadata incomplete | Version `0.1.1` writes Unicode arrays and safely recovers old bundles from the persisted predictor schema without enabling pickle. |
 | `--max-time` is cooperative | A single estimator fit can exceed the budget | Documented; hard isolation would require subprocess workers. |
 | Image models download on first use | Offline image runs fail without a local model cache | Actionable dependency/runtime error; pre-provision models in deployment. |
 | Backbone probes are approximate | A 10% or 30% ranking can eliminate a late-improving candidate | Nested stages retain three then two candidates; force an explicit list or one key when domain knowledge is stronger. |
@@ -793,42 +791,44 @@ ignore rules prevent equivalent new files from being added accidentally.
 | Default memory contribution is an operational policy choice | Sanitized run metadata may still be unsuitable for some regulated environments | Raw data and clear-text paths are excluded; use `contribute_memory=False` or an isolated `memory_dir`. |
 | Incremental learning is estimator-dependent | Tree ensembles and vision adapters cannot safely use generic `partial_fit` | Capability detection returns `retrain_required`; use the online SGD preset or an explicit challenger retrain. |
 | Automatic drift-triggered updates can react to transient shifts | A short-lived batch may not justify promotion | Require labels, a holdout gate, minimum batch sizes, monitoring thresholds, and human approval for high-risk systems. |
-| No image end-to-end CI fixture | Model downloads are too large for fast unit tests | Cache logic is isolated; add a mocked processor/model integration test. |
+| Real pretrained-model downloads are excluded from standard CI | Upstream model-host or weight failures are not exercised on every commit | Mocked public-API vision finalization and Transformers output tests cover package integration; run a clean TestPyPI image smoke test before release. |
 | Joblib model loading executes Python objects | Untrusted model files are unsafe | Load only artifacts produced by trusted runs. |
 | XLS parsing adds an old-format dependency | Extra base dependency for a legacy format | Drop XLS if only modern XLSX is required. |
 
 ## 15. Production Readiness Assessment
 
-The runtime architecture is production-oriented for local and batch AutoML,
-but the repository is not yet ready for the public `0.1.0` release.
+The runtime architecture is production-oriented for local and batch AutoML.
+Version `0.1.0` is published on PyPI; the current source is the `0.1.1` patch
+release candidate.
 
-Verification on 2026-08-02 produced this exact status:
+Verification on 2026-08-03 produced this exact source status:
 
-- Pytest collected 22 production tests: all 22 passed.
+- Pytest collected 25 production tests: all 25 passed.
 - Framework lifecycle, drift, local memory, mandatory artifacts, grouped image
   splitting, backbone selection/fallback logic, calibration, and executable
   notebook tests passed.
 - Framework tests now cover both canonical-first and capitalized-first imports;
   both expose the canonical `autonexus.api.AutoNexus` class on Windows.
-- Prior CLI, synthetic tabular, wheel, and source-distribution checks completed,
-  but the current documentation/package state has not been rebuilt and
-  revalidated as a clean release candidate.
+- Vision regressions reproduce the legacy object-array artifact safely, verify
+  metadata exists before completion is rendered, and normalize modern
+  Transformers pooling outputs returned by CLIP-family models.
+- The shared engine configures UTF-8-safe standard streams for both SDK and CLI
+  execution, preventing Windows CP1252 crashes in Unicode progress output.
 
-Release blockers, in order:
+Remaining `0.1.1` release gates, in order:
 
-1. Replace the `LICENSE/` directory with a regular root `LICENSE` file
-   containing the complete Apache-2.0 text.
-2. Remove tracked personal Git configuration, redundant requirements, and the
-   approved legacy prototype set from the public repository.
-3. Commit and push the import fix and release cleanup.
-4. Remove stale files from `dist/`, rebuild from the clean release commit, run
-   `twine check` on the exact wheel
-   and sdist, and validate installation from TestPyPI in a fresh environment.
+1. Build fresh `0.1.1` wheel and source-distribution files without reusing the
+   immutable `0.1.0` artifacts.
+2. Run `twine check`, inspect wheel/sdist contents, and install the wheel into
+   a clean environment.
+3. Publish to TestPyPI and run tabular plus image public-API smoke tests.
+4. Record SHA-256 hashes, publish the exact tested files to PyPI, tag `v0.1.1`,
+   and verify installation from the production index.
 
-The production package boundary is already isolated from the historical
-prototypes, the Git remote points to `dineshmc1/AutoNexus`, and the complete
-test suite is green. The remaining work is release hygiene and clean
-end-to-end distribution verification.
+The package boundary is isolated from historical prototypes, the root license
+is valid, the Git remote targets `dineshmc1/AutoNexus`, and the complete source
+suite is green. The remaining work is clean distribution verification and
+registry promotion.
 
 ## 16. Summary
 
@@ -850,6 +850,6 @@ logistic control, validation-gated family diversity, early stopping, LoRA
 weight decay, and non-worsening temperature scaling.
 
 The production runtime is unified, and the old experimental stack has no
-runtime role in the declared distribution. Public release should wait until
-the license path, repository cleanup, release commit, and fresh distribution
-verification items in Section 15 are complete.
+runtime role in the declared distribution. Version `0.1.1` should be promoted
+only after the fresh distribution and TestPyPI verification gates in Section
+15 are complete.

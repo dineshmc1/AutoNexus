@@ -1102,7 +1102,25 @@ def _load_input(config: RunConfig) -> tuple[DataBundle, pd.DataFrame]:
     return bundle, raw_df
 
 
-def run(config: RunConfig) -> dict[str, Any]:
+def render_run_completion(dashboard: dict[str, Any]) -> None:
+    """Render completion only after every caller-owned finalizer succeeds."""
+    phase(5, "Mission Complete", "validated model / sealed artifact bundle")
+    _display_results(dashboard["results"], dashboard["problem_type"])
+    render_final_dashboard(
+        best_model=dashboard["best_model"],
+        representation=dashboard["representation"],
+        metric_rows=dashboard["metric_rows"],
+        timing_rows=dashboard["timing_rows"],
+        resource_rows=dashboard["resource_rows"],
+        artifacts=dashboard["artifacts"],
+        elapsed_seconds=dashboard["elapsed_seconds"],
+    )
+
+
+def run(
+    config: RunConfig, *, render_completion: bool = True
+) -> dict[str, Any]:
+    _configure_stdio()
     started = time.monotonic()
     config.output_dir.mkdir(parents=True, exist_ok=True)
     phase(1, "Input Matrix", "validation / split firewall / representation")
@@ -1638,8 +1656,6 @@ def run(config: RunConfig) -> dict[str, Any]:
             )
         except (OSError, ValueError) as exc:
             LOGGER.warning("Could not finalize notebook context: %s", exc)
-    phase(5, "Mission Complete", "validated model / sealed artifact bundle")
-    _display_results(results, bundle.problem_type)
     metric_label = (
         "ACCURACY" if bundle.problem_type == "classification" else "R2"
     )
@@ -1726,12 +1742,12 @@ def run(config: RunConfig) -> dict[str, Any]:
     ]
     if html_report_path:
         artifacts.append(("HTML", str(html_report_path)))
-    render_final_dashboard(
-        best_model=best_name,
-        representation=bundle.metadata.get("selected_representation"),
-        metric_rows=metric_rows,
-        timing_rows=timing_rows,
-        resource_rows=[
+    completion_dashboard = {
+        "best_model": best_name,
+        "representation": bundle.metadata.get("selected_representation"),
+        "metric_rows": metric_rows,
+        "timing_rows": timing_rows,
+        "resource_rows": [
             (
                 "RAM CURRENT / PEAK",
                 f"{_format_usage(usage['ram_current_mb'])} / "
@@ -1745,9 +1761,13 @@ def run(config: RunConfig) -> dict[str, Any]:
                 "nexus.blue",
             ),
         ],
-        artifacts=artifacts,
-        elapsed_seconds=elapsed,
-    )
+        "artifacts": artifacts,
+        "elapsed_seconds": elapsed,
+        "results": results,
+        "problem_type": bundle.problem_type,
+    }
+    if render_completion:
+        render_run_completion(completion_dashboard)
     return {
         "best_model": best_name,
         "problem_type": bundle.problem_type,
@@ -1763,6 +1783,7 @@ def run(config: RunConfig) -> dict[str, Any]:
                 config.output_dir / "search_profile.json"
             ),
         },
+        "_completion_dashboard": completion_dashboard,
     }
 
 
