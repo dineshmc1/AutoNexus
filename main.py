@@ -87,6 +87,8 @@ class RunConfig:
     adapt_lora: bool
     backbones: list[str]
     backbone_time_seconds: float
+    preprocessing_cache: bool
+    use_memory: bool
     contribute_memory: bool
     memory_dir: Path | None
 
@@ -232,6 +234,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Cooperative time budget for automatic backbone search",
     )
     parser.add_argument(
+        "--preprocessing-cache",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Cache reusable preprocessing transforms during model search",
+    )
+    parser.add_argument(
+        "--memory-retrieval",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use compatible FAISS run memory to advise the model shortlist",
+    )
+    parser.add_argument(
         "--contribute-memory",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -352,6 +366,8 @@ def _config_from_args(args: argparse.Namespace) -> RunConfig:
         adapt_lora=args.adapt_lora,
         backbones=backbones,
         backbone_time_seconds=args.backbone_time,
+        preprocessing_cache=args.preprocessing_cache,
+        use_memory=args.memory_retrieval,
         contribute_memory=args.contribute_memory,
         memory_dir=(
             None
@@ -878,6 +894,41 @@ def _load_image_dataset(config: RunConfig) -> tuple[DataBundle, pd.DataFrame]:
                 adapted_gate,
                 adapted_gate_labels.astype(str),
             )
+            frozen_movement = pd.concat(
+                [frozen_fit, frozen_gate], ignore_index=True
+            )
+            adapted_movement = pd.concat(
+                [adapted_fit, adapted_gate], ignore_index=True
+            )
+            movement_labels = pd.concat(
+                [adapted_fit_labels, adapted_gate_labels], ignore_index=True
+            ).astype(str)
+            movement_count = min(len(frozen_movement), 1200)
+            movement_indices = np.linspace(
+                0,
+                len(frozen_movement) - 1,
+                movement_count,
+                dtype=int,
+            )
+            movement_path = (
+                config.output_dir / "analysis_data" / "lora_movement.npz"
+            )
+            movement_path.parent.mkdir(parents=True, exist_ok=True)
+            np.savez_compressed(
+                movement_path,
+                frozen=frozen_movement.iloc[movement_indices].to_numpy(
+                    dtype=np.float16
+                ),
+                adapted=adapted_movement.iloc[movement_indices].to_numpy(
+                    dtype=np.float16
+                ),
+                labels=movement_labels.iloc[movement_indices].to_numpy(
+                    dtype=str
+                ),
+            )
+            image_metadata["lora_movement_path"] = str(
+                movement_path.resolve()
+            )
         except Exception as exc:
             adapted_embedder.release()
             return frozen_fallback_after_lora_failure(exc, lora_started)
@@ -1183,8 +1234,10 @@ def run(
         cv=min(cv, 2),
         random_state=config.random_state,
         max_time_seconds=baseline_budget,
-        preprocessing_cache_dir=str(
-            config.output_dir / ".cache" / "preprocessing"
+        preprocessing_cache_dir=(
+            str(config.output_dir / ".cache" / "preprocessing")
+            if config.preprocessing_cache
+            else None
         ),
         groups=training_groups,
     )
@@ -1205,9 +1258,28 @@ def run(
         "baseline_scores": baseline_scores,
         "embedding": search_embedding.tolist(),
     }
-    (config.output_dir / "search_profile.json").write_text(
-        json.dumps(search_profile, indent=2), encoding="utf-8"
-    )
+    memory_advice: dict[str, Any] = {
+        "status": "disabled",
+        "rationale": "Memory retrieval was disabled for this run.",
+    }
+    if config.use_memory:
+        try:
+            from autonexus.memory import retrieve_search_advice
+
+            memory_advice = retrieve_search_advice(
+                search_embedding,
+                baseline_scores,
+                problem_type=bundle.problem_type,
+                embedding_version=SEARCH_EMBEDDING_VERSION,
+                memory_dir=config.memory_dir,
+            )
+        except Exception as exc:
+            memory_advice = {
+                "status": "unavailable",
+                "error": f"{type(exc).__name__}: {exc}",
+                "rationale": "Ordinary current-dataset search was retained.",
+            }
+            LOGGER.warning("FAISS memory retrieval failed: %s", exc)
     if bundle.problem_type == "classification":
         from generalization import MODEL_FAMILIES
 
@@ -1223,6 +1295,29 @@ def run(
                     key=lambda name: baseline_scores[name]["score"],
                 )
                 promising[family_best] = models[family_best]
+    if config.use_memory:
+        try:
+            from autonexus.memory import apply_search_advice
+
+            promising, shortlist_changes = apply_search_advice(
+                promising,
+                models,
+                baseline_scores,
+                memory_advice,
+            )
+            memory_advice["shortlist_changes"] = shortlist_changes
+        except Exception as exc:
+            memory_advice = {
+                **memory_advice,
+                "status": "advice-rejected",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+            LOGGER.warning("FAISS memory advice was rejected: %s", exc)
+    memory_advice["final_shortlist"] = list(promising)
+    search_profile["memory_advice"] = memory_advice
+    (config.output_dir / "search_profile.json").write_text(
+        json.dumps(search_profile, indent=2), encoding="utf-8"
+    )
 
     fe_log: list[str] = []
     scaler_map = None
@@ -1261,8 +1356,10 @@ def run(
         bundle.problem_type,
         cv=cv,
         max_time_seconds=config.max_time_seconds,
-        preprocessing_cache_dir=str(
-            config.output_dir / ".cache" / "preprocessing"
+        preprocessing_cache_dir=(
+            str(config.output_dir / ".cache" / "preprocessing")
+            if config.preprocessing_cache
+            else None
         ),
         groups=training_groups,
         random_state=config.random_state,
@@ -1376,21 +1473,34 @@ def run(
 
     plot_paths: list[str] = []
     html_report_path: str | None = None
+    explanations: dict[str, str] = {
+        "feature_importance_status": "disabled",
+        "feature_importance_error": "Reporting was disabled.",
+        "shap_status": "disabled",
+        "shap_error": "Reporting was disabled.",
+    }
+    report_errors: list[str] = []
     phase(4, "Evidence Layer", "analytics / explanations / reproducibility")
     report_started = time.monotonic()
     if config.report:
+        report_dir = config.output_dir / "report"
+        eda_result: dict[str, Any] = {}
         try:
             from eda import run_eda
-            from explainer import run_explanations
-            from report_generator import generate_report
 
-            report_dir = config.output_dir / "report"
             eda_result = run_eda(
                 raw_df,
                 bundle.target_name,
                 bundle.problem_type,
                 output_dir=str(report_dir / "eda"),
             )
+        except Exception as exc:
+            message = f"EDA failed: {type(exc).__name__}: {exc}"
+            report_errors.append(message)
+            LOGGER.warning(message)
+        try:
+            from explainer import run_explanations
+
             explanations = run_explanations(
                 trained[best_name],
                 X_test_final,
@@ -1398,28 +1508,48 @@ def run(
                 output_dir=str(report_dir / "explanations"),
                 use_shap=config.shap,
             )
-            html_report_path = generate_report(
-                summary=eda_result["summary"],
-                results=results,
-                best_name=best_name,
-                problem_type=bundle.problem_type,
-                eda_paths=eda_result,
-                explanation_paths=explanations,
-                fe_log=fe_log,
-                output_path=str(report_dir / "report.html"),
-            )
-            plot_paths = [
-                path
-                for path in [
-                    eda_result.get("target_dist_path"),
-                    eda_result.get("feature_dist_path"),
-                    eda_result.get("corr_heatmap_path"),
-                    *explanations.values(),
-                ]
-                if path
-            ]
         except Exception as exc:
-            LOGGER.warning("Plot/HTML report generation failed: %s", exc)
+            message = f"Explainability failed: {type(exc).__name__}: {exc}"
+            report_errors.append(message)
+            LOGGER.warning(message)
+            explanations = {
+                "feature_importance_status": "failed",
+                "feature_importance_error": message,
+                "shap_status": "failed",
+                "shap_error": message,
+            }
+        if eda_result:
+            try:
+                from report_generator import generate_report
+
+                html_report_path = generate_report(
+                    summary=eda_result["summary"],
+                    results=results,
+                    best_name=best_name,
+                    problem_type=bundle.problem_type,
+                    eda_paths=eda_result,
+                    explanation_paths=explanations,
+                    fe_log=fe_log,
+                    output_path=str(report_dir / "report.html"),
+                )
+            except Exception as exc:
+                message = f"HTML report failed: {type(exc).__name__}: {exc}"
+                report_errors.append(message)
+                LOGGER.warning(message)
+        plot_paths = [
+            path
+            for path in [
+                eda_result.get("target_dist_path"),
+                eda_result.get("feature_dist_path"),
+                eda_result.get("corr_heatmap_path"),
+                *(
+                    value
+                    for key, value in explanations.items()
+                    if key.endswith("_path")
+                ),
+            ]
+            if path
+        ]
     reporting_seconds = time.monotonic() - report_started
 
     elapsed = time.monotonic() - started
@@ -1441,7 +1571,16 @@ def run(
         },
         "search_models_screened": len(baseline_scores),
         "search_embedding_version": SEARCH_EMBEDDING_VERSION,
+        "memory_retrieval": memory_advice,
         "input_metadata": bundle.metadata,
+        "explanations": {
+            key: value
+            for key, value in explanations.items()
+            if key.endswith("_status")
+            or key.endswith("_error")
+            or key in {"shap_scope", "shap_reference_model"}
+        },
+        "report_errors": report_errors,
     }
     summary["fitted_training_metric"] = round(training_metric, 6)
     summary["primary_cross_validated_metric"] = (
@@ -1656,6 +1795,16 @@ def run(
             )
         except (OSError, ValueError) as exc:
             LOGGER.warning("Could not finalize notebook context: %s", exc)
+    try:
+        from notebook_generator import create_notebook_bundle
+
+        create_notebook_bundle(
+            config.output_dir,
+            notebook_path=Path(notebook_path),
+            plot_paths=plot_paths,
+        )
+    except (OSError, ValueError) as exc:
+        LOGGER.warning("Could not package the notebook bundle: %s", exc)
     metric_label = (
         "ACCURACY" if bundle.problem_type == "classification" else "R2"
     )

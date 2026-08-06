@@ -2,7 +2,7 @@
 
 **Leakage-aware, resource-conscious AutoML for tabular and image learning**
 
-AutoNexus is a Python framework and command-line interface for training,
+AutoNexus is a Python framework, web studio, and command-line interface for training,
 evaluating, packaging, and monitoring machine-learning models. A single engine
 supports tabular classification, tabular regression, and folder-based image
 classification. It combines development-only model selection, resource-aware
@@ -16,7 +16,8 @@ model = AutoNexus(preset="balanced").fit("data.csv", target="label")
 predictions = model.predict("unseen.csv")
 ```
 
-> **Project status:** AutoNexus is version `0.1.1`. The packaged runtime is
+> **Project status:** The current source targets AutoNexus `0.2.0`; `0.1.1` is
+> the latest published framework release. The packaged runtime is
 > designed for local and batch experimentation, but users should independently
 > validate models, data splits, licenses, and operational controls before
 > deploying them in high-risk environments.
@@ -31,6 +32,7 @@ predictions = model.predict("unseen.csv")
 - [Technology Stack](#technology-stack)
 - [Installation](#installation)
 - [Usage](#usage)
+- [Web Studio](#web-studio)
 - [Python API](#python-api)
 - [Configuration](#configuration)
 - [Run Artifacts](#run-artifacts)
@@ -69,7 +71,8 @@ monitoring, gated incremental updates when the estimator supports
 
 | Area | Capability |
 |---|---|
-| Unified training | One SDK and CLI for tabular classification, tabular regression, and image classification |
+| Unified training | One SDK, CLI, and Web Studio for tabular classification, tabular regression, and image classification |
+| Web Studio | Local-first dataset inspection, background training queue, live mission telemetry, run history, and safe artifact downloads |
 | Leakage control | Development-only search, fold-local preprocessing, group-aware validation, and one final held-out test evaluation |
 | Vision search | Automatic comparison of CLIP, DINOv2, ResNet-50, and SigLIP frozen representations |
 | Efficient adaptation | Optional transformer LoRA with augmentation, AdamW weight decay, gradient checkpointing when applicable, early stopping, and best-checkpoint restoration |
@@ -113,18 +116,20 @@ subject, video-folder, or frame-sequence groups. Reliable groups remain
 disjoint; otherwise, the system uses a stratified image split.
 
 Audio, video, text, executable-file analysis, neural architecture search, and
-distributed multi-node training are outside the packaged `0.1.1` runtime.
+distributed multi-node training are outside the packaged `0.2.0` runtime.
 
 ## System Architecture
 
-The SDK and CLI translate user input into the same immutable run configuration
+The SDK, CLI, and Web Studio translate user input into the same immutable run configuration
 and call the same training engine. This avoids separate implementations for
 interactive and programmatic use.
 
 ```mermaid
 flowchart LR
+    Browser[Browser user] --> Studio[Auto Nexus Studio]
     User[Terminal user] --> CLI[AutoNexus CLI]
     App[Python application] --> SDK[AutoNexus SDK]
+    Studio --> Engine[Unified training engine]
     CLI --> Engine[Unified training engine]
     SDK --> Engine
 
@@ -147,7 +152,7 @@ flowchart LR
 
 ### Architectural Principles
 
-1. **One engine:** CLI and SDK behavior converge on `main.run`.
+1. **One engine:** Web Studio, CLI, and SDK behavior converge on `main.run`.
 2. **Test-set firewall:** the test partition is evaluated after all choices are fixed.
 3. **Modality adapter:** images become dense feature tables and reuse the downstream tabular path.
 4. **Cheap-to-expensive search:** short baseline screens precede cross-validation and optional HPO.
@@ -285,7 +290,7 @@ test performance are recorded as distinct quantities.
 | LLM reporting | LiteLLM, Ollama, local Transformers, callable and HTTP adapters |
 | Monitoring | JSONL, logging, webhooks, and optional Prometheus metrics |
 | Streaming and data access | pandas batches, SQL/DB-API, Kafka/Redpanda, PyArrow |
-| Serving | Optional FastAPI and Uvicorn |
+| Web Studio and serving | FastAPI, Uvicorn, multipart upload handling, packaged HTML/CSS/JavaScript |
 | Packaging and tests | `pyproject.toml`, uv, setuptools, pytest |
 
 Heavy capabilities are optional and imported lazily. A core tabular run does
@@ -313,7 +318,7 @@ Install only the capabilities required by the application:
 | Memory | `pip install "AutoNexus[memory]"` | FAISS-backed meta-memory |
 | Monitoring | `pip install "AutoNexus[monitoring]"` | Prometheus metrics and monitoring dependencies |
 | Streaming | `pip install "AutoNexus[streaming]"` | Kafka, Parquet, and SQL extras |
-| Serving | `pip install "AutoNexus[serve]"` | FastAPI inference service |
+| Web Studio and serving | `pip install "AutoNexus[serve]"` | Local training studio and FastAPI inference service |
 | All | `pip install "AutoNexus[all]"` | All optional runtime capabilities |
 
 GPU users should install a PyTorch build compatible with their CUDA driver and
@@ -432,6 +437,107 @@ Selected CLI options:
 
 Use `autonexus --help` for the complete option set.
 
+## Web Studio
+
+Auto Nexus Studio provides a local graphical control plane for nontechnical
+and technical users. It supports local dataset paths, browser uploads,
+lightweight dataset inspection, configurable training missions, persisted run
+history, live status polling, generalization metrics, and allowlisted artifact
+downloads. Training remains inside `AutoNexus.fit`; the website does not
+maintain a separate ML pipeline.
+
+Install and launch the single-user Studio:
+
+```bash
+pip install "AutoNexus[serve]"
+autonexus-web
+```
+
+For repository development:
+
+```bash
+uv sync --extra serve --extra dev
+uv run autonexus-web
+```
+
+The browser opens at `http://127.0.0.1:8787`. Runs are stored outside the
+source tree in the current user's application-data directory by default
+(`%LOCALAPPDATA%\AutoNexus\studio-runs` on Windows). A different location or
+port can be selected:
+
+```bash
+autonexus-web --workspace D:\AutoNexusRuns --port 9000
+```
+
+Local mode deliberately permits only loopback hosts. For a shared Studio,
+install `AutoNexus[serve,auth]`, configure Firebase, and bind to the intended
+interface. The server verifies every Firebase ID token and scopes runs,
+artifacts, monitoring, deployments, and audit events to its UID. Remote users
+are upload-only by default; server-local dataset paths require the explicit
+`AUTONEXUS_ALLOW_REMOTE_LOCAL_PATHS=true` administrator override.
+
+### Firebase Authentication
+
+1. Create a Firebase project and Web app.
+2. In Firebase Authentication, enable the Email/Password sign-in provider and
+   create or invite users.
+3. Install `pip install "AutoNexus[serve,auth]"`.
+4. Configure server credentials through
+   `GOOGLE_APPLICATION_CREDENTIALS` or Application Default Credentials.
+5. Set the public Web app values below and launch the server.
+
+```powershell
+$env:AUTONEXUS_AUTH_MODE="firebase"
+$env:AUTONEXUS_FIREBASE_API_KEY="your-web-api-key"
+$env:AUTONEXUS_FIREBASE_PROJECT_ID="your-project-id"
+$env:AUTONEXUS_FIREBASE_AUTH_DOMAIN="your-project-id.firebaseapp.com"
+$env:AUTONEXUS_FIREBASE_APP_ID="your-web-app-id"
+autonexus-web --host 0.0.0.0
+```
+
+The Firebase Web API key is public application configuration, not an Admin
+credential. Service-account material must remain server-side and must never be
+placed in the browser bundle or committed to Git.
+
+### Web Studio LLM and BYOK
+
+The mission composer provides four report-generation modes:
+
+| Mode | Credential source | Behavior |
+|---|---|---|
+| Server environment | `LLM_MODEL` plus the provider variable in `.env` or the process environment | Uses centrally managed configuration |
+| Bring your own API key | Password field held only in server memory for that queued/running mission | Uses the selected hosted provider, exact model identifier, and optional custom endpoint |
+| Local Ollama | No hosted key; configurable local HTTP endpoint | Sends the final run context to the selected Ollama model |
+| Deterministic offline | None | Writes the standard local Markdown explanation without an external call |
+
+Hosted BYOK supports OpenAI, Anthropic, Google Gemini, OpenRouter, Groq,
+Mistral AI, and custom LiteLLM/OpenAI-compatible endpoints. AutoNexus prefixes
+the submitted model identifier with the selected provider when needed. It
+does not maintain a hard-coded model catalogue because provider model IDs and
+availability change independently of AutoNexus.
+
+The API key is submitted only to the loopback server, separated from the
+persistable run configuration, retained in process memory while the mission is
+queued or running, and removed afterward. It is not written to `web_run.json`,
+`run.json`, logs, browser storage, reports, or artifacts. Provider failures are
+redacted before they can enter the offline fallback report.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/health` | Runtime version and authentication mode |
+| `GET /api/auth/config` | Public login configuration and local-path policy |
+| `GET /api/auth/me` | Verified current principal |
+| `POST /api/datasets/inspect` | Lightweight local dataset profile |
+| `POST /api/runs` | Validate and enqueue a training mission |
+| `GET /api/runs` | Owner-scoped persisted mission archive |
+| `GET /api/runs/{id}` | Current status, metrics, events, and artifacts |
+| `GET /api/runs/{id}/insights` | Lineage plus cached, model-ranked geometry with safe raw axes, class/prediction metadata, and conditional response surfaces |
+| `GET/POST /api/runs/{id}/monitoring...` | Baseline health and production-batch drift |
+| `POST /api/runs/{id}/incremental-update` | Immutable gated incremental challenger |
+| `POST/DELETE /api/runs/{id}/deploy` | Activate or stop in-process inference |
+| `POST /api/deployments/{id}/predict` | Authenticated prediction plus telemetry |
+| `GET /api/runs/{id}/artifacts/{name}` | Download an allowlisted run artifact |
+
 ## Python API
 
 ### Core Objects
@@ -459,6 +565,7 @@ trainer = AutoNexus(
     preset="balanced",
     output_dir="artifacts",
     models=None,
+    use_memory=True,
     contribute_memory=True,
     memory_dir=None,
     llm=True,
@@ -515,6 +622,7 @@ Every successful SDK or CLI run writes the following minimum contract:
 | `model.pkl` | Deployable predictor containing transformations, estimator, labels, modality, and inference metadata |
 | `run.json` | Model, target, configuration, metrics, split evidence, resources, timings, calibration, artifact paths, and memory status |
 | `analysis.ipynb` | Executable pre-training-first data and model investigation |
+| `analysis_bundle.zip` | Portable notebook plus bounded `analysis_data`, metrics, and plots required to run it |
 | `report/explanation.md` | LLM-generated or deterministic offline explanation |
 | `search_profile.json` | Versioned statistical and landmark dataset representation |
 
@@ -535,11 +643,13 @@ LLM failure does not invalidate a completed model. AutoNexus writes a
 deterministic local Markdown explanation when the configured provider,
 credentials, dependency, or network is unavailable.
 
-Local meta-memory contribution is enabled by default. It stores sanitized
-dataset fingerprints, statistical/landmark embeddings, model results, and
-timing metadata. It does not store raw rows, images, or the clear-text dataset
-path. Disable contribution with `contribute_memory=False` or
-`--no-contribute-memory`.
+Local meta-memory retrieval and contribution are enabled by default. Compatible
+neighbors provide failure-aware shortlist advice after landmark screening, but
+current-dataset validation remains authoritative. Future entries store
+selection/CV evidence rather than held-out test metrics. Raw rows, images, and
+clear-text dataset paths are excluded. Configure retrieval with
+`use_memory=False` or `--no-memory-retrieval`; configure contribution with
+`contribute_memory=False` or `--no-contribute-memory`.
 
 ## Data Analytics Notebook
 
@@ -583,7 +693,7 @@ flowchart LR
     Drift --> Policy{Drift and labels?}
     Policy -->|No| Observe[Emit monitoring event]
     Policy -->|Yes and partial_fit| Candidate[Incremental challenger]
-    Policy -->|Yes without partial_fit| Retrain[Explicit retraining request]
+    Policy -->|Yes without partial_fit| Retrain[Retrained challenger]
     Candidate --> Gate[Unseen update gate]
     Gate -->|Accept| Promote[Promote and persist]
     Gate -->|Reject| Champion[Retain champion]
@@ -603,6 +713,12 @@ monitor = model.monitor(
 report = monitor.observe(incoming_frame)
 ```
 
+Batches smaller than `minimum_samples` run schema and type validation but do
+not claim population, prediction-frequency, or performance drift. Their report
+uses `severity="insufficient_data"` and `drifted=False` unless a real schema
+error is present. Aggregate more observations before making drift or update
+decisions.
+
 Run a labelled incremental workflow:
 
 ```python
@@ -614,10 +730,25 @@ model = AutoNexus(preset="online").fit(
 result = model.update(new_labelled_rows, target="label")
 ```
 
-An incremental candidate is evaluated on an unseen gate and promoted only if
-it satisfies the update policy. Models without native `partial_fit` return
-`retrain_required`; vision models return `adapter_or_retrain_required` rather
-than pretending to support generic online updates.
+An update candidate is evaluated on an unseen new-data gate, persisted under an
+immutable version directory, and promoted only if it strictly outperforms the
+champion. With `strategy="auto"`, incompatible trees and ensembles receive a
+full retrained challenger. Explicit `strategy="incremental"` still returns
+`retrain_required` when `partial_fit` is unavailable. Vision models return
+`adapter_or_retrain_required` rather than pretending to support generic online
+updates.
+
+## One-Line Deployment
+
+```python
+deployment = model.deploy()
+```
+
+This starts an inference API on localhost in the background and returns a
+handle containing `predict_url`, `health_url`, `stop()`, and `wait()`. Public
+binding requires an API key plus explicit insecure-HTTP acknowledgement; use a
+trusted TLS reverse proxy for internet-facing deployments. The blocking
+`model.serve()` development API remains available.
 
 ## Project Structure
 
@@ -627,14 +758,18 @@ AutoNexus/
 |   |-- api.py                 # High-level AutoNexus facade
 |   |-- config.py              # Presets and immutable configuration
 |   |-- model.py               # Inference, updates, monitoring, serving
+|   |-- deployment.py          # Authenticated background inference service
 |   |-- data.py                # Batch and streaming data sources
 |   |-- drift.py               # Drift baseline and detectors
 |   |-- monitoring.py          # Monitoring loop and sinks
 |   |-- memory.py              # Local FAISS/NumPy meta-memory
 |   |-- llm.py                 # LLM provider adapters
+|   |-- web_auth.py            # Local/Firebase identity verification
 |   |-- registry.py            # Version promotion and rollback
 |   |-- plugins.py             # Extension registry
-|   `-- callbacks.py           # Lifecycle events
+|   |-- callbacks.py           # Lifecycle events
+|   |-- web.py                 # Local web API and background run manager
+|   `-- web_static/            # Packaged Studio frontend and PDF slots
 |-- main.py                    # CLI and unified orchestration engine
 |-- data_loader.py             # Tabular and image input boundaries
 |-- image_splitting.py         # Group-aware image splitting
@@ -659,11 +794,10 @@ AutoNexus/
 `-- uv.lock                    # Reproducible dependency resolution
 ```
 
-The wheel includes only modules declared in `pyproject.toml` and the
-`autonexus` package. Historical agent, NAS, W&B, and earlier meta-learning
-prototypes still present in the repository are not imported by the production
-entry path and are excluded from the built distribution. See
-[`understanding.md`](understanding.md) for the complete file-level boundary.
+The repository and wheel contain only the maintained production framework,
+its packaged Studio assets, compatibility modules, tests, and documentation.
+Historical agent, NAS, W&B, and earlier meta-learning prototypes remain
+recoverable from Git history but are not part of the active source tree.
 
 ## Results
 
@@ -797,7 +931,7 @@ Build and validate the distribution:
 
 ```bash
 uv build
-uvx twine check dist/autonexus-0.1.1-py3-none-any.whl dist/autonexus-0.1.1.tar.gz
+uvx twine check dist/autonexus-0.2.0-py3-none-any.whl dist/autonexus-0.2.0.tar.gz
 ```
 
 The tests cover the public framework lifecycle, mandatory artifacts, drift,

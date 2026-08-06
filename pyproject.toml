@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "AutoNexus"
-version = "0.1.1"
+version = "0.2.0"
 authors = [
     { name = "Dinesh" },
 ]
@@ -25,7 +25,7 @@ dependencies = [
     "scikit-learn>=1.2",
     "scipy>=1.9",
     "seaborn>=0.12",
-    "xlrd>=2",
+    "xlrd>=2,<2.0.2",
 ]
 [project.urls]
 Homepage = "https://github.com/dineshmc1/AutoNexus"
@@ -57,13 +57,20 @@ images = [
 llm = ["litellm>=1", "python-dotenv>=1"]
 memory = ["faiss-cpu>=1.8"]
 monitoring = ["prometheus-client>=0.20", "opentelemetry-api>=1.24"]
-serve = ["fastapi>=0.111", "uvicorn>=0.30"]
+auth = ["firebase-admin>=6.5"]
+serve = [
+    "fastapi>=0.111",
+    "litellm>=1",
+    "python-multipart>=0.0.9",
+    "uvicorn>=0.30",
+]
 streaming = ["kafka-python-ng>=2.2", "pyarrow>=16", "sqlalchemy>=2"]
-analytics = ["umap-learn>=0.5"]
-dev = ["pytest>=8"]
+analytics = ["ipykernel>=6", "jupyterlab>=4", "umap-learn>=0.5"]
+dev = ["httpx>=0.27", "pytest>=8"]
 all = [
     "faiss-cpu>=1.8",
     "fastapi>=0.111",
+    "firebase-admin>=6.5",
     "kafka-python-ng>=2.2",
     "lightgbm>=4",
     "litellm>=1",
@@ -75,6 +82,7 @@ all = [
     "prometheus-client>=0.20",
     "pyarrow>=16",
     "python-dotenv>=1",
+    "python-multipart>=0.0.9",
     "shap>=0.42,<0.52",
     "sqlalchemy>=2",
     "torch>=2",
@@ -88,6 +96,7 @@ all = [
 [project.scripts]
 ml-builder = "main:main"
 autonexus = "main:main"
+autonexus-web = "autonexus.web:main"
 
 [tool.setuptools]
 py-modules = [
@@ -120,6 +129,15 @@ py-modules = [
 
 [tool.setuptools.packages.find]
 include = ["autonexus*"]
+
+[tool.setuptools.package-data]
+autonexus = [
+    "web_static/*.html",
+    "web_static/*.css",
+    "web_static/*.js",
+    "web_static/documents/*.md",
+    "web_static/documents/*.pdf",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

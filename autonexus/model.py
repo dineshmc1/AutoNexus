@@ -6,6 +6,7 @@ import json
 import pickle
 import shutil
 import time
+import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,8 @@ class UpdateResult:
     reason: str
     samples_seen: int
     model_path: str
+    version: str | None = None
+    stage: str | None = None
 
 
 @dataclass(frozen=True)
@@ -40,7 +43,8 @@ class UpdatePolicy:
     strategy: str = "auto"
     minimum_batch_size: int = 20
     validation_fraction: float = 0.2
-    max_allowed_drop: float = 0.005
+    minimum_improvement: float = 0.0
+    max_allowed_drop: float = 0.0
 
 
 class NexusModel:
@@ -90,6 +94,7 @@ class NexusModel:
             "run": self.output_dir / "run.json",
             "model": self.model_path,
             "notebook": self.output_dir / "analysis.ipynb",
+            "analytics_bundle": self.output_dir / "analysis_bundle.zip",
             "markdown": self.output_dir / "report" / "explanation.md",
             "search_profile": self.output_dir / "search_profile.json",
         }
@@ -241,6 +246,172 @@ class NexusModel:
             return np.asarray([mapping[str(value)] for value in values])
         return pd.to_numeric(values, errors="raise").to_numpy(dtype=int)
 
+    def _challenger_retrain_update(
+        self,
+        batch: pd.DataFrame,
+        *,
+        target: str,
+        validation: pd.DataFrame | None,
+        minimum_batch_size: int,
+        validation_fraction: float,
+        minimum_improvement: float,
+    ) -> UpdateResult:
+        """Retrain an immutable challenger and gate it on new labeled data."""
+        if minimum_improvement < 0:
+            raise ValueError("minimum_improvement cannot be negative.")
+        if validation is None and len(batch) < minimum_batch_size:
+            return UpdateResult(
+                "deferred",
+                False,
+                None,
+                None,
+                f"At least {minimum_batch_size} rows or an explicit "
+                "validation batch is required.",
+                len(batch),
+                str(self.model_path),
+            )
+        if validation is not None and target not in validation:
+            raise ValueError(f"Target column {target!r} is missing from validation.")
+
+        if validation is None:
+            stratify = None
+            if self.problem_type == "classification":
+                counts = batch[target].astype(str).value_counts()
+                if len(counts) > 1 and int(counts.min()) >= 2:
+                    stratify = batch[target].astype(str)
+            fit_batch, gate = train_test_split(
+                batch,
+                test_size=validation_fraction,
+                random_state=42,
+                stratify=stratify,
+            )
+        else:
+            fit_batch, gate = batch, validation.copy()
+
+        original_path = Path(str(self.manifest.get("dataset", "")))
+        if not original_path.is_file():
+            return UpdateResult(
+                "retrain_required",
+                False,
+                None,
+                None,
+                "The original dataset is unavailable for challenger retraining.",
+                len(batch),
+                str(self.model_path),
+            )
+        original = self._read_input_with_target(original_path)
+        combined = pd.concat([original, fit_batch], ignore_index=True).drop_duplicates()
+        # Keep Windows Joblib cache paths below legacy path-length limits.
+        version = f"r-{uuid.uuid4().hex[:10]}"
+        version_dir = self.output_dir / "updates" / version
+
+        from .api import AutoNexus
+
+        trainer = AutoNexus(
+            task=self.problem_type,
+            preset="balanced",
+            output_dir=version_dir,
+            models=list(self.manifest.get("models", [])),
+            preprocessing_cache=False,
+            use_memory=bool(self.manifest.get("use_memory", True)),
+            contribute_memory=False,
+            llm=False,
+            report=False,
+            shap=False,
+            feature_engineering=bool(
+                self.manifest.get("feature_engineering", False)
+            ),
+            interactions=self.manifest.get("interactions"),
+            ratios=bool(self.manifest.get("ratios", False)),
+            outlier_strategy=str(
+                self.manifest.get("outlier_strategy", "cap")
+            ),
+            tune=bool(self.manifest.get("tune", False)),
+            tune_method=str(
+                self.manifest.get("tune_method", "randomized")
+            ),
+            tune_iterations=int(
+                self.manifest.get("tune_iterations", 20)
+            ),
+        )
+        challenger = trainer.fit(combined, target=target)
+        gate_features = gate.drop(columns=[target])
+        actual = gate[target].astype(str).to_numpy()
+        champion_predictions = self.predict(gate_features).astype(str)
+        candidate_predictions = challenger.predict(gate_features).astype(str)
+        if self.problem_type == "classification":
+            previous_score = float(
+                accuracy_score(actual, champion_predictions)
+            )
+            candidate_score = float(
+                accuracy_score(actual, candidate_predictions)
+            )
+        else:
+            numeric_actual = pd.to_numeric(gate[target]).to_numpy()
+            previous_score = float(
+                r2_score(numeric_actual, champion_predictions.astype(float))
+            )
+            candidate_score = float(
+                r2_score(numeric_actual, candidate_predictions.astype(float))
+            )
+        promoted = candidate_score > previous_score + minimum_improvement
+        reason = (
+            "Retrained challenger strictly outperformed the champion on the "
+            "new-data holdout gate."
+            if promoted
+            else "Retrained challenger did not strictly outperform the champion."
+        )
+        if promoted:
+            temporary = self.model_path.with_suffix(".tmp")
+            shutil.copy2(challenger.model_path, temporary)
+            temporary.replace(self.model_path)
+            challenger_best = challenger.output_dir / "best_model.joblib"
+            if challenger_best.is_file():
+                shutil.copy2(
+                    challenger_best,
+                    self.output_dir / "best_model.joblib",
+                )
+            challenger_baseline = (
+                challenger.output_dir / "monitoring" / "baseline.json"
+            )
+            if challenger_baseline.is_file():
+                baseline_target = (
+                    self.output_dir / "monitoring" / "baseline.json"
+                )
+                baseline_target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(challenger_baseline, baseline_target)
+            self.predictor = joblib.load(self.model_path)
+            self.manifest["best_model"] = challenger.best_model
+            self.manifest["model_used"] = challenger.best_model
+
+        result = UpdateResult(
+            "challenger_retrain",
+            promoted,
+            previous_score,
+            candidate_score,
+            reason,
+            len(batch),
+            str(challenger.model_path),
+            version,
+            "champion" if promoted else "rejected_challenger",
+        )
+        (version_dir / "update.json").write_text(
+            json.dumps({"timestamp": time.time(), **asdict(result)}, indent=2),
+            encoding="utf-8",
+        )
+        history = self.output_dir / "monitoring" / "update_history.jsonl"
+        history.parent.mkdir(parents=True, exist_ok=True)
+        with history.open("a", encoding="utf-8") as stream:
+            stream.write(
+                json.dumps({"timestamp": time.time(), **asdict(result)}) + "\n"
+            )
+        self.manifest.setdefault("updates", []).append(asdict(result))
+        self.manifest_path.write_text(
+            json.dumps(self.manifest, indent=2), encoding="utf-8"
+        )
+        self.callbacks.emit("model_updated", result=asdict(result))
+        return result
+
     def update(
         self,
         data: pd.DataFrame | str | Path,
@@ -248,12 +419,14 @@ class NexusModel:
         target: str,
         strategy: str = "auto",
         validation: pd.DataFrame | None = None,
-        max_allowed_drop: float = 0.005,
+        max_allowed_drop: float = 0.0,
+        minimum_improvement: float = 0.0,
         policy: UpdatePolicy | None = None,
     ) -> UpdateResult:
         if policy is not None:
             strategy = policy.strategy
             max_allowed_drop = policy.max_allowed_drop
+            minimum_improvement = policy.minimum_improvement
             minimum_batch_size = policy.minimum_batch_size
             validation_fraction = policy.validation_fraction
         else:
@@ -276,9 +449,29 @@ class NexusModel:
         )
         if target not in batch:
             raise ValueError(f"Target column {target!r} is missing.")
-        if strategy not in {"auto", "incremental"}:
-            raise ValueError("strategy must be 'auto' or 'incremental'")
+        if strategy not in {"auto", "incremental", "retrain"}:
+            raise ValueError(
+                "strategy must be 'auto', 'incremental', or 'retrain'"
+            )
+        if strategy == "retrain":
+            return self._challenger_retrain_update(
+                batch,
+                target=target,
+                validation=validation,
+                minimum_batch_size=minimum_batch_size,
+                validation_fraction=validation_fraction,
+                minimum_improvement=minimum_improvement,
+            )
         if not self.supports_incremental_learning:
+            if strategy == "auto":
+                return self._challenger_retrain_update(
+                    batch,
+                    target=target,
+                    validation=validation,
+                    minimum_batch_size=minimum_batch_size,
+                    validation_fraction=validation_fraction,
+                    minimum_improvement=minimum_improvement,
+                )
             return UpdateResult(
                 "retrain_required",
                 False,
@@ -339,18 +532,34 @@ class NexusModel:
         )
         previous_score = float(scoring(y_gate, champion_predictions))
         candidate_score = float(scoring(y_gate, candidate_predictions))
-        promoted = candidate_score >= previous_score - max_allowed_drop
+        # A live champion is never replaced by a merely non-inferior update.
+        # Keep max_allowed_drop in the pre-1.0 signature for compatibility,
+        # but enforce the stricter production promotion invariant.
+        del max_allowed_drop
+        if minimum_improvement < 0:
+            raise ValueError("minimum_improvement cannot be negative.")
+        promoted = candidate_score > previous_score + minimum_improvement
         reason = (
-            "Candidate passed the holdout non-regression gate."
+            "Candidate strictly outperformed the champion on the holdout gate."
             if promoted
-            else "Candidate exceeded the permitted holdout performance drop."
+            else "Candidate did not strictly outperform the champion."
         )
+        version = (
+            f"{time.strftime('%Y%m%d-%H%M%S')}-"
+            f"{uuid.uuid4().hex[:8]}"
+        )
+        version_dir = self.output_dir / "updates" / version
+        version_dir.mkdir(parents=True, exist_ok=False)
+        candidate_path = version_dir / "model.pkl"
+        joblib.dump(candidate, candidate_path)
+        joblib.dump(candidate.model, version_dir / "best_model.joblib")
         if promoted:
             temporary = self.model_path.with_suffix(".tmp")
-            joblib.dump(candidate, temporary)
+            shutil.copy2(candidate_path, temporary)
             temporary.replace(self.model_path)
-            joblib.dump(
-                candidate.model, self.output_dir / "best_model.joblib"
+            shutil.copy2(
+                version_dir / "best_model.joblib",
+                self.output_dir / "best_model.joblib",
             )
             self.predictor = candidate
         result = UpdateResult(
@@ -360,7 +569,16 @@ class NexusModel:
             candidate_score,
             reason,
             len(batch),
-            str(self.model_path),
+            str(candidate_path),
+            version,
+            "champion" if promoted else "rejected_challenger",
+        )
+        (version_dir / "update.json").write_text(
+            json.dumps(
+                {"timestamp": time.time(), **asdict(result)},
+                indent=2,
+            ),
+            encoding="utf-8",
         )
         history = self.output_dir / "monitoring" / "update_history.jsonl"
         history.parent.mkdir(parents=True, exist_ok=True)
@@ -480,32 +698,64 @@ class NexusModel:
             else registered
         )
 
-    def serve(self, *, host: str = "127.0.0.1", port: int = 8000) -> None:
+    def deploy(
+        self,
+        *,
+        host: str = "127.0.0.1",
+        port: int = 8000,
+        api_key: str | None = None,
+        allow_insecure_public: bool = False,
+    ):
+        """Start a background inference API in one line."""
+        from .deployment import deploy_model
+
+        handle = deploy_model(
+            self,
+            host=host,
+            port=port,
+            api_key=api_key,
+            allow_insecure_public=allow_insecure_public,
+        )
+        events = self.output_dir / "monitoring" / "deployments.jsonl"
+        events.parent.mkdir(parents=True, exist_ok=True)
+        with events.open("a", encoding="utf-8") as stream:
+            stream.write(
+                json.dumps(
+                    {
+                        "timestamp": time.time(),
+                        "host": host,
+                        "port": port,
+                        "authenticated": bool(api_key),
+                        "predict_url": handle.predict_url,
+                    }
+                )
+                + "\n"
+            )
+        return handle
+
+    def serve(
+        self,
+        *,
+        host: str = "127.0.0.1",
+        port: int = 8000,
+        api_key: str | None = None,
+        allow_insecure_public: bool = False,
+    ) -> None:
         try:
-            from fastapi import FastAPI
-            from pydantic import BaseModel
             import uvicorn
         except ImportError as exc:
             raise RuntimeError(
                 "Serving requires: pip install AutoNexus[serve]"
             ) from exc
+        from .deployment import create_inference_app
 
-        nexus_model = self
-
-        class PredictionRequest(BaseModel):
-            records: list[dict[str, Any]]
-
-        app = FastAPI(title="AutoNexus Inference", version="1")
-
-        @app.get("/health")
-        def health():
-            return {"status": "ok", "model": nexus_model.best_model}
-
-        @app.post("/predict")
-        def predict(request: PredictionRequest):
-            predictions = nexus_model.predict(
-                pd.DataFrame(request.records)
+        local_hosts = {"127.0.0.1", "localhost", "::1"}
+        if host not in local_hosts and (
+            not api_key or not allow_insecure_public
+        ):
+            raise ValueError(
+                "Public serving requires api_key and "
+                "allow_insecure_public=True behind a TLS reverse proxy."
             )
-            return {"predictions": predictions.tolist()}
-
+        app = create_inference_app(self, api_key=api_key)
         uvicorn.run(app, host=host, port=port)

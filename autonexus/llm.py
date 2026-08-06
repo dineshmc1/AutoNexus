@@ -9,6 +9,13 @@ from collections.abc import Callable
 from typing import Any
 
 
+def _validated_text(value: Any) -> str:
+    """Require providers to return substantive text, not ``None`` or blanks."""
+    if not isinstance(value, str) or not value.strip():
+        raise RuntimeError("LLM provider returned an empty response.")
+    return value.strip()
+
+
 class LLMProvider(ABC):
     @abstractmethod
     def generate(self, prompt: str, *, context: dict[str, Any]) -> str:
@@ -20,7 +27,9 @@ class CallableLLMProvider(LLMProvider):
         self.function = function
 
     def generate(self, prompt: str, *, context: dict[str, Any]) -> str:
-        return str(self.function(prompt=prompt, context=context))
+        return _validated_text(
+            self.function(prompt=prompt, context=context)
+        )
 
 
 class LiteLLMProvider(LLMProvider):
@@ -52,7 +61,7 @@ class LiteLLMProvider(LLMProvider):
             ],
             **self.completion_options,
         )
-        return str(response.choices[0].message.content)
+        return _validated_text(response.choices[0].message.content)
 
 
 class OllamaProvider(LLMProvider):
@@ -82,7 +91,7 @@ class OllamaProvider(LLMProvider):
         with urllib.request.urlopen(
             request, timeout=self.timeout
         ) as response:
-            return str(json.load(response)["response"])
+            return _validated_text(json.load(response)["response"])
 
 
 class TransformersProvider(LLMProvider):
@@ -122,7 +131,7 @@ class TransformersProvider(LLMProvider):
             max_new_tokens=self.max_new_tokens,
             return_full_text=False,
         )
-        return str(result[0]["generated_text"])
+        return _validated_text(result[0]["generated_text"])
 
 
 class HTTPJSONProvider(LLMProvider):
@@ -155,4 +164,4 @@ class HTTPJSONProvider(LLMProvider):
         with urllib.request.urlopen(
             request, timeout=self.timeout
         ) as response:
-            return self.response_parser(json.load(response))
+            return _validated_text(self.response_parser(json.load(response)))

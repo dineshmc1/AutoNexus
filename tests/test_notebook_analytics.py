@@ -14,7 +14,7 @@ from sklearn.linear_model import LogisticRegression
 
 from analytics_artifacts import audit_image_files, persist_run_analytics
 from data_loader import DataBundle
-from notebook_generator import generate_advanced_notebook
+from notebook_generator import create_notebook_bundle, generate_advanced_notebook
 
 
 def test_image_audit_finds_unreadable_and_exact_duplicates(tmp_path):
@@ -66,6 +66,9 @@ def test_notebook_is_pretraining_first_and_all_code_cells_parse(tmp_path):
     )
 
     notebook = nbformat.read(output, as_version=4)
+    assert notebook.metadata["ml_builder"]["analytics_directory"] == (
+        "analysis_data"
+    )
     markdown = "\n".join(
         cell.source for cell in notebook.cells if cell.cell_type == "markdown"
     )
@@ -86,6 +89,18 @@ def test_notebook_is_pretraining_first_and_all_code_cells_parse(tmp_path):
     for cell in notebook.cells:
         if cell.cell_type == "code":
             ast.parse(cell.source)
+
+    (analysis_dir / "run_context.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "metrics.csv").write_text("model,accuracy\n", encoding="utf-8")
+    bundle = create_notebook_bundle(
+        tmp_path,
+        notebook_path=output,
+    )
+    import zipfile
+
+    with zipfile.ZipFile(bundle) as archive:
+        assert "analysis.ipynb" in archive.namelist()
+        assert "analysis_data/run_context.json" in archive.namelist()
 
 
 def test_persisted_classification_bundle_supports_notebook_cells(tmp_path):

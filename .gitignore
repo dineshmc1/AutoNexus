@@ -21,6 +21,7 @@ dist/
 
 # Runtime outputs and caches
 artifacts/
+/autonexus-workspace/
 embedding_cache/
 lora_adapters/
 models/
@@ -32,6 +33,8 @@ wandb/
 *.html
 *.png
 *.pkl
+*.faiss
+*.pt
 
 # Local tooling
 .understand-anything/

@@ -8,6 +8,7 @@ logs as base64 images.  Branded as **MLBuilder**.
 from __future__ import annotations
 
 import base64
+import html
 import os
 from typing import Any, Dict, List, Optional
 
@@ -61,6 +62,42 @@ def _fe_log_to_html(fe_log: List[str]) -> str:
         return '<p style="color:#94a3b8;">Feature engineering was not enabled.</p>'
     items = "".join(f"<li>{line}</li>" for line in fe_log)
     return f'<ul class="fe-log">{items}</ul>'
+
+
+def _shap_fallback(explanation_paths: Dict[str, str]) -> str:
+    status = explanation_paths.get("shap_status", "unavailable")
+    reason = explanation_paths.get("shap_error", "")
+    labels = {
+        "disabled": "SHAP was not requested for this run.",
+        "failed": "SHAP generation failed for the selected estimator.",
+        "unavailable": "SHAP artifacts were not produced.",
+    }
+    message = labels.get(status, labels["unavailable"])
+    detail = f"<br><code>{html.escape(reason)}</code>" if reason else ""
+    return f'<p class="evidence-note"><strong>{message}</strong>{detail}</p>'
+
+
+def _feature_importance_fallback(explanation_paths: Dict[str, str]) -> str:
+    reason = explanation_paths.get("feature_importance_error", "")
+    detail = f"<br><code>{html.escape(reason)}</code>" if reason else ""
+    return (
+        '<p class="evidence-note"><strong>Feature importance was not '
+        f"produced.</strong>{detail}</p>"
+    )
+
+
+def _shap_scope_note(explanation_paths: Dict[str, str]) -> str:
+    if explanation_paths.get("shap_scope") != "ensemble_member_reference":
+        return ""
+    member = html.escape(
+        explanation_paths.get("shap_reference_model", "reference member")
+    )
+    return (
+        '<p class="evidence-note"><strong>Scope:</strong> These SHAP plots '
+        f"explain the fitted <code>{member}</code> ensemble member. They are "
+        "not exact additive SHAP values for the calibrated probability "
+        "ensemble.</p>"
+    )
 
 
 # CSS
@@ -128,6 +165,12 @@ _CSS = """
     padding: 8px 14px; margin-bottom: 6px; border-radius: 6px;
     font-size: 0.92rem; font-family: 'Consolas', monospace;
   }
+  .evidence-note {
+    color: #475569; background: #f8fafc; border: 1px solid #cbd5e1;
+    border-left: 4px solid #f59e0b; border-radius: 8px; padding: 14px;
+    text-align: left;
+  }
+  .evidence-note code { color: #9a3412; overflow-wrap: anywhere; }
   footer {
     text-align: center; padding: 24px; color: #94a3b8;
     font-size: 0.82rem;
@@ -283,7 +326,7 @@ def generate_report(
   <section>
     <h2>📌 Feature Importance</h2>
     <div class="img-center">
-      {_embed_image(explanation_paths.get('feature_importance_path', ''), 'Feature Importance')}
+      {_embed_image(explanation_paths.get('feature_importance_path', ''), 'Feature Importance') or _feature_importance_fallback(explanation_paths)}
     </div>
   </section>
 
@@ -291,10 +334,26 @@ def generate_report(
   <section>
     <h2>🔍 SHAP Explanations</h2>
     <div class="img-center">
-      {_embed_image(explanation_paths.get('shap_summary_path', ''), 'SHAP Summary') or '<p style="color:#94a3b8;">SHAP plots not available.</p>'}
+      {_embed_image(explanation_paths.get('shap_summary_path', ''), 'SHAP Summary') or _shap_fallback(explanation_paths)}
     </div>
+    {_shap_scope_note(explanation_paths)}
     <div class="img-center">
       {_embed_image(explanation_paths.get('shap_importance_path', ''), 'SHAP Importance')}
+    </div>
+    <div class="img-center">
+      {_embed_image(explanation_paths.get('shap_dependence_path', ''), 'SHAP Dependence')}
+    </div>
+  </section>
+
+  <!-- Local Explanation -->
+  <section>
+    <h2>Local Prediction Explanation</h2>
+    <p>The waterfall and decision plots explain the first bounded held-out sample used by the evidence layer.</p>
+    <div class="img-center">
+      {_embed_image(explanation_paths.get('shap_waterfall_path', ''), 'SHAP Local Waterfall')}
+    </div>
+    <div class="img-center">
+      {_embed_image(explanation_paths.get('shap_decision_path', ''), 'SHAP Decision Plot')}
     </div>
   </section>
 
@@ -311,5 +370,5 @@ def generate_report(
         fh.write(html)
 
     abs_path = os.path.abspath(output_path)
-    print(f"[Report] HTML report saved → {abs_path}")
+    print(f"[Report] HTML report saved -> {abs_path}")
     return abs_path

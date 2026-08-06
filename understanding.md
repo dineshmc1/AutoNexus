@@ -2,13 +2,14 @@
 
 ## 1. Executive Summary
 
-AutoNexus is a Python 3.12 AutoML framework with two interfaces over one
+AutoNexus is a Python 3.12 AutoML framework with three interfaces over one
 training engine:
 
 - `autonexus.AutoNexus` is the compact SDK used by applications.
 - `main.py`, `autonexus`, and `ml-builder` expose the same engine as a CLI.
+- `autonexus-web` launches the local Auto Nexus Studio for browser users.
 
-The current package metadata declares version `0.1.1`, author `Dinesh`, and
+The current source declares version `0.2.0`, author `Dinesh`, and
 the SPDX license expression `Apache-2.0`. The canonical, cross-platform Python
 import is `from autonexus import AutoNexus`. The capitalized `import AutoNexus`
 compatibility path is also supported: package initialization aliases both
@@ -28,11 +29,13 @@ classification probabilities, evaluate once on test, and write a reusable
 model plus reports and reproducibility metadata.
 
 Every successful run has a strict artifact contract: `run.json`, `model.pkl`,
-`analysis.ipynb`, `report/explanation.md`, and `search_profile.json`.
+`analysis.ipynb`, portable `analysis_bundle.zip`, `report/explanation.md`, and
+`search_profile.json`.
 The production distribution is explicitly declared in `pyproject.toml`.
-Historical W&B, agentic, and NAS prototypes are not imported and are excluded
-from that distribution boundary. Version `0.1.0` is the first public PyPI
-release; `0.1.1` is the compatibility and artifact-finalization patch release.
+Historical W&B, agentic, NAS, and superseded meta-learning prototypes were
+removed from the active source tree and remain recoverable from Git history.
+Versions `0.1.0` and `0.1.1` are published; `0.2.0` adds the packaged local
+Web Studio.
 
 ## 2. System Boundary
 
@@ -40,8 +43,10 @@ release; `0.1.1` is the compatibility and artifact-finalization patch release.
 flowchart LR
     Developer[Python application] --> SDK[autonexus.AutoNexus]
     User[User / shell] --> CLI[main.py / autonexus / ml-builder]
+    Browser[Browser user] --> Web[autonexus-web / FastAPI]
     SDK --> Engine[main.run RunConfig]
     CLI --> Engine
+    Web --> SDK
     Engine --> Input{Input type}
     Input -->|CSV / Excel| Tabular[Tabular loader]
     Input -->|Directory| Vision[Grouped split and automatic backbone tournament]
@@ -54,7 +59,7 @@ flowchart LR
     Lifecycle --> User
 ```
 
-The stable contract includes the SDK, CLI, serialized run bundle, drift
+The stable contract includes the SDK, CLI, local Web Studio, serialized run bundle, drift
 baseline, local meta-memory, streaming source protocol, update gate, model
 registry, and optional inference server. W&B experiment tracking, autonomous
 agents, executable-file analysis, audio/video/text training, and neural
@@ -114,6 +119,54 @@ The SDK does not maintain a second training implementation. It translates
 typed `NexusConfig` values into `RunConfig`, calls `main.run`, then adds
 lifecycle metadata and a persisted monitoring baseline. This prevents CLI and
 library behavior from diverging.
+
+### 3.2 Web Studio Lifecycle
+
+```mermaid
+flowchart TD
+    A[Browser] --> Auth{Local loopback or Firebase ID token}
+    Auth -->|verified principal| B{Dataset source}
+    B -->|local mode or explicit admin override| C[Server-side path inspection]
+    B -->|Browser upload| D[Sanitized isolated input directory]
+    C --> E[Validated web mission configuration]
+    D --> E
+    E --> F[Single-worker RunManager queue]
+    F --> G[AutoNexus.fit]
+    G --> H[main.run unified engine]
+    H --> I[Persist model and evidence bundle]
+    I --> J[Persist web_run.json]
+    J --> K[Live polling and run archive]
+    K --> L[Owner-scoped artifacts, lineage, explanations, monitoring, audit]
+    L --> M[Authenticated in-process deployment]
+```
+
+`autonexus/web.py` is a control plane, not a model-training implementation.
+It validates browser input, persists mission state atomically, serializes
+training jobs to avoid uncontrolled RAM/VRAM contention, invokes the public
+SDK, and exposes only fixed artifact names. Interrupted queued/running jobs are
+marked explicitly when the service restarts. Local mode is restricted to
+loopback. Firebase mode verifies ID tokens server-side and filters every run,
+artifact, evidence image, deployment, monitoring request, and audit event by
+UID. Remote users are upload-only unless an administrator explicitly permits
+server-local paths. Runs default to the user's application-data directory, not
+the Git worktree.
+
+The Studio now has seven operational views: overview, mission composer, run
+archive, interactive pipeline/data lineage with a 2D ledger, scientifically
+labelled explainability geometry, live monitoring/incremental updates, and an
+owner-scoped audit log. Deployment is a real authenticated in-process endpoint,
+not a fabricated cloud deployment; it becomes inactive when the Studio process
+restarts.
+
+Web LLM configuration has four modes: server environment, hosted BYOK, local
+Ollama, and deterministic offline. Hosted BYOK accepts a provider, exact model
+identifier, optional custom HTTP endpoint, and API key. Validation separates
+public metadata from a private secret dictionary before `RunManager.enqueue`.
+Only public fields enter `web_run.json`; secrets remain in an in-memory map,
+are converted to a redacting provider inside the worker, and are removed in a
+`finally` block. Provider exceptions have credential values replaced before
+the SDK can append a fallback error to `explanation.md`. The LLM receives the
+final manifest context after training and cannot affect model selection.
 
 ## 4. Input Workflows
 
@@ -319,13 +372,18 @@ flowchart TD
     I --> J[Prune weak candidates]
     I --> K[Landmark scores]
     K --> L[Versioned 16D search embedding]
+    L --> M[Retrieve compatible FAISS neighbors]
+    M --> N[Failure-aware advisory shortlist]
+    N --> O[Current baseline veto and final shortlist]
 ```
 
 The baseline screen is the model-shortlist gatekeeper. It uses a stratified
 sample for classification, at most two folds, and a separate time budget.
 The search embedding combines statistical meta-features with observed
-landmark performance. It is persisted for future retrieval systems, but the
-production CLI does not currently query FAISS.
+landmark performance. The active CLI and SDK retrieve only compatible nearby
+runs, use validation-based success/failure evidence to reorder or prune the
+shortlist, and preserve current-dataset baseline evidence as the final veto.
+Held-out test metrics are excluded from new routing evidence.
 
 ### 6.2 Feature and Preprocessing Workflow
 
@@ -534,6 +592,7 @@ calibration, final evaluation, and model persistence.
 | Idea | Why it matters |
 |---|---|
 | One public CLI | Users test any supported dataset without editing source. |
+| One local Web Studio | Nontechnical users configure and inspect runs without creating a second training pipeline. |
 | Immutable run configuration | Every runtime choice can be serialized into the manifest. |
 | Modality adapter, shared AutoML core | Images become numeric DataFrames, then reuse the tabular model path. |
 | Test-set firewall | Selection and calibration happen before the test set is evaluated. |
@@ -552,6 +611,7 @@ calibration, final evaluation, and model persistence.
 | One SDK/CLI engine | Programmatic and shell users share `main.run`; there is no duplicate training pipeline. |
 | Mandatory run bundle | Every successful run contains the same five minimum deployment/audit artifacts. |
 | Provider-independent LLM | Reports can use LiteLLM, Ollama, local Transformers, custom callables, or generic JSON APIs without influencing model selection. |
+| Ephemeral Web BYOK | Hosted keys are separated from public mission state, memory-only, redacted from failures, and destroyed after each run. |
 | Local opt-out meta-memory | Statistical/landmark vectors contribute by default; raw examples are excluded and contribution can be disabled. |
 | Drift as evidence, not auto-promotion | Schema, feature, prediction, and labelled performance signals trigger policy, while candidate promotion remains gated. |
 | Capability-aware updates | Native `partial_fit` is used only when supported; other models request explicit replacement training. |
@@ -583,7 +643,7 @@ These are the modules explicitly included in the wheel by `pyproject.toml`.
 | `lora_config.py` | Provides backward-compatible default LoRA settings from the production vision registry. |
 | `lora_adapter_trainer.py` | Performs winner-specific group-aware transformer LoRA with augmentation, AdamW, clipping/checkpointing, early stopping, and metadata. |
 | `eda.py` | Produces dataset summaries, target distributions, feature distributions, and correlation plots using a non-interactive backend. |
-| `explainer.py` | Produces permutation importance and optional SHAP explanations for fitted pipelines. |
+| `explainer.py` | Unwraps calibrated estimators and produces permutation importance plus SHAP beeswarm, global importance, dependence, local waterfall, and cumulative decision evidence. |
 | `report_generator.py` | Combines metrics, EDA, explanations, and feature-engineering logs into HTML. |
 | `llm_explainer.py` | Requests a constrained LiteLLM report and writes a deterministic Markdown fallback on any failure. |
 | `analytics_artifacts.py` | Audits images before training and persists bounded predictions, probabilities, embeddings, leaderboards, fingerprints, versions, hardware, and notebook context. |
@@ -593,8 +653,9 @@ These are the modules explicitly included in the wheel by `pyproject.toml`.
 | `autonexus/__init__.py` | Curated public API and framework version. |
 | `autonexus/api.py` | High-level fit/load facade, DataFrame/source materialization, callbacks, framework metadata, drift-baseline creation, and custom LLM reporting. |
 | `autonexus/config.py` | Frozen public configuration, duration parsing, presets, overrides, and translation to the unified `RunConfig`. |
-| `autonexus/model.py` | Loaded run lifecycle: tabular/image inference, artifact access, safe incremental gates, replacement retraining, monitoring, registry integration, and FastAPI serving. |
-| `autonexus/drift.py` | Persisted reference distributions and deterministic schema, numeric, categorical, prediction, and task-aware performance drift signals. |
+| `autonexus/model.py` | Loaded run lifecycle: inference, artifact access, immutable incremental challengers with strict promotion gates, replacement retraining, monitoring, registry integration, and FastAPI serving. |
+| `autonexus/deployment.py` | Safe one-line localhost deployment, optional bearer authentication, public-bind guardrails, and background server lifecycle handles. |
+| `autonexus/drift.py` | Compact persisted reference distributions plus always-on schema/type validation and minimum-sample-gated missingness, outlier, duplicate, constant-column, numeric, categorical, prediction, and task-aware performance signals. |
 | `autonexus/monitoring.py` | Batch/stream monitor plus logging, JSONL, webhook, and Prometheus sinks. |
 | `autonexus/data.py` | Restartable DataFrame, file, iterator, SQL, and optional Kafka/Redpanda batch sources. |
 | `autonexus/memory.py` | Privacy-bounded local FAISS/NumPy meta-memory, locking, duplicate prevention, contribution policy, and nearest-run search. |
@@ -603,25 +664,31 @@ These are the modules explicitly included in the wheel by `pyproject.toml`.
 | `autonexus/plugins.py` | Registration points for custom estimators and extension factories. |
 | `autonexus/callbacks.py` | Failure-isolated lifecycle event callbacks. |
 | `autonexus/exceptions.py` | Stable framework-specific exception hierarchy. |
+| `autonexus/web.py` | FastAPI control plane, authenticated owner isolation, safe upload/path policy, background run queue, lineage/evidence APIs, monitoring, incremental updates, one-click local deployment, audit events, and allowlisted artifact delivery. |
+| `autonexus/web_auth.py` | Local-loopback identity and Firebase Admin ID-token verification boundary. |
+| `autonexus/web_static/index.html` | Seven-view Studio structure with research-document slots, auth gate, mission composer, lineage, explainability, monitoring, updates, deployments, and audit history. |
+| `autonexus/web_static/styles.css` | Responsive visual system, motion, layout, form controls, mission cards, and accessible reduced-motion behavior. |
+| `autonexus/web_static/app.js` | Firebase login/session refresh, dataset selection, mission submission, polling, canvas lineage, and interactive model geometry with separate raw/projected coordinates, rotation, zoom, honest confidence tooltips, categorical filters, labelled axes, evidence downloads, monitoring, updates, deployment, and audit rendering. |
 
 ## 10. Important Project and Test Files
 
 | File | Meaning |
 |---|---|
-| `pyproject.toml` | Canonical `AutoNexus` `0.1.1` metadata, author, Apache-2.0 SPDX declaration, base/optional dependencies, console entrypoints, explicit wheel module list, and pytest settings. |
+| `pyproject.toml` | Canonical `AutoNexus` `0.2.0` metadata, author, Apache-2.0 SPDX declaration, base/optional dependencies, CLI/Web entrypoints, packaged static assets, explicit wheel module list, and pytest settings. |
 | `uv.lock` | Exact reproducible dependency resolution for base and optional extras. |
 | `README.md` | Publication-quality project overview with abstract, architecture, methodology, API/CLI usage, artifact contract, qualified case-study results, limitations, future work, references, and license status. |
 | `understanding.md` | This architecture and operational reference. |
 | `codes.md` | Copy-ready SDK, CLI, monitoring, streaming, update, registry, serving, memory, and LLM examples. |
 | `LICENSE` | Complete Apache-2.0 license text in the regular root file required by the distribution metadata. |
 | `.python-version` | Pins the local Python line to 3.12. |
-| `.env.example` | Safe template for LiteLLM model/provider configuration; it contains no real secret. |
+| `.env.example` | Safe template for LiteLLM, Studio workspace, remote-path policy, and Firebase public configuration; it contains no real secret. |
 | `.gitignore` | Excludes datasets, secrets, environments, caches, builds, models, and run artifacts. |
 | `tests/test_data_loader.py` | Verifies split preservation, development-only ID filtering, and retention of legitimate predictive features. |
 | `tests/test_cli_calibration.py` | Verifies no-argument CLI parsing and that temperature scaling preserves predicted classes and normalized probabilities. |
 | `tests/test_image_splitting.py` | Verifies group isolation/CV, nested tournament samples, automatic backbone selection, CLIP fallback, LoRA probing, and ExtraTrees defaults without model downloads. |
 | `tests/test_notebook_analytics.py` | Verifies unreadable/duplicate image auditing, pre-training-first section order, code-cell syntax, persisted analysis artifacts, and end-to-end notebook-cell execution. |
 | `tests/test_framework.py` | Verifies imports, drift, memory deduplication/search, the compact API, mandatory artifacts, inference, monitoring, and gated incremental update. |
+| `tests/test_web.py` | Verifies upload path safety, tabular inspection, configuration validation, background run persistence, completion metadata, and artifact allowlisting. |
 
 ## 11. Runtime Artifacts and Their Meaning
 
@@ -635,10 +702,12 @@ These are the modules explicitly included in the wheel by `pyproject.toml`.
 | `report/report.html` | Human-readable combined report with embedded plots. |
 | `report/explanation.md` | LLM-generated or deterministic offline model explanation. |
 | `analysis.ipynb` | Pre-training-first data investigation and post-training model audit. |
+| `analysis_bundle.zip` | Portable notebook bundle containing `analysis.ipynb`, bounded `analysis_data`, metrics, and referenced plots. Extract before execution. |
 | `analysis_data/data_index.csv` | Image path, split, class/group, readability, dimensions, format, file size, exact hash, bounded quality statistics, and near-duplicate candidates. |
 | `analysis_data/prediction_index.csv` | Held-out labels, predictions, confidence, uncertainty, correctness/error, row/image identity, and optional groups. |
 | `analysis_data/test_probabilities.npz` | Raw and temperature-scaled held-out probabilities used for calibration and per-class diagnostics. |
 | `analysis_data/embedding_sample.npz` | Deterministic class-covering FP16 representation sample for PCA/UMAP, separation, learning curves, and nearest neighbors. |
+| `analysis_data/lora_movement.npz` | Bounded paired frozen/adapted embeddings for honest PCA movement arrows when LoRA was evaluated. |
 | `analysis_data/model_leaderboard.csv` | Baseline, CV mean/std, completed folds, selected test metrics, runtime, and observed process RAM. |
 | `analysis_data/run_context.json` | Configuration, final summary, hardware, package versions, exact split fingerprints, and artifact paths. |
 | `report/eda/*.png` | Target, feature, and correlation diagnostics. |
@@ -649,35 +718,28 @@ These are the modules explicitly included in the wheel by `pyproject.toml`.
 | `monitoring/baseline.json` | Task-aware training distribution and expected-performance reference used by drift detection. |
 | `monitoring/events.jsonl` | Append-only default drift observations when monitoring runs. |
 | `monitoring/update_history.jsonl` | Append-only champion/challenger decisions for incremental updates. |
+| `updates/<version>/` | Immutable incremental candidate model and decision metadata, retained whether promoted or rejected. |
 | `framework.json` | Compact public API context, class/feature names, preset, and lifecycle capabilities. |
 | `~/.autonexus/memory/` | Default local meta-memory; contains dataset embeddings and sanitized run metadata, never raw rows or images. |
 | `dist/*.whl` | Installable production wheel containing only declared production modules. |
 | `dist/*.tar.gz` | Source distribution generated by `uv build`. |
 
 Artifacts are generated outputs and should not be committed. The ignore policy
-now excludes future runs, but previously tracked outputs remain in Git until
-they are removed from the index deliberately.
+excludes future runs, serialized FAISS indexes, and neural checkpoints; the
+historical tracked copies were removed from the active tree.
 
-## 12. Non-Production Files Still Present in the Worktree
+## 12. Historical Source Cleanup
 
-The following files are disconnected from `main.py`, excluded from the wheel,
-and are repository-cleanup candidates. Many remain tracked even though current
-ignore rules prevent equivalent new files from being added accidentally.
+The disconnected agentic, W&B, NAS, multimodal-memory, and superseded
+meta-learning prototypes were removed before the `0.2.0` release. Git history
+retains them for research provenance without exposing their dependencies or
+generated model/index files in normal checkouts or distributions.
 
-### Agent Prototype
+The active local meta-memory implementation is `autonexus/memory.py`; it uses
+the documented `~/.autonexus/memory/` runtime location and never relies on a
+repository-committed FAISS index or neural checkpoint.
 
-| File | Historical purpose |
-|---|---|
-| `agents/agent_orchestrator.py` | Chained data, business, feature, model, and critic agents. |
-| `agents/data_agent.py` | LLM data profiling and notebook request. |
-| `agents/business_agent.py` | LLM business-context inference. |
-| `agents/feature_agent.py` | LLM feature suggestions. |
-| `agents/model_agent.py` | LLM model recommendations. |
-| `agents/critic_agent.py` | LLM critique stage. |
-| `agents/notebook_generator.py` | Older agent-specific notebook writer. |
-| `test_agentic_pipeline.py` | Manual script for the removed agent workflow. |
-
-### FAISS and Meta-Learning Prototype
+### Removed FAISS and Meta-Learning Prototype
 
 | File | Historical purpose |
 |---|---|
@@ -695,13 +757,13 @@ ignore rules prevent equivalent new files from being added accidentally.
 | `paradigm_router.py` | LLM ML-vs-DL routing experiment. |
 | `onboarding_agent.py` | Interactive onboarding configuration experiment. |
 | `memory_store.faiss` | Historical serialized FAISS index. |
-| `memory_store.pkl` | Historical metadata sidecar, ignored but still local. |
+| `memory_store.pkl` | Historical metadata sidecar. |
 | `task_encoder.pt` | Historical task encoder checkpoint. |
 | `test_cold_start.py` | Manual tests for the old cold-start system. |
 | `test_embedding.py` | Manual tests for the old dataset embedding API. |
 | `test_unified_memory.py` | Manual tests for the old unified memory system. |
 
-### Multimodal Memory Prototype
+### Removed Multimodal Memory Prototype
 
 | File | Historical purpose |
 |---|---|
@@ -713,11 +775,10 @@ ignore rules prevent equivalent new files from being added accidentally.
 | `dl_metadata_vision.json` | Historical vision index metadata. |
 | `dl_metadata_video.json` | Historical video index metadata. |
 
-### NAS, HPO, W&B, and Ensemble Prototype
+### Removed NAS, HPO, W&B, and Ensemble Prototype
 
 | File | Historical purpose |
 |---|---|
-| `auto_dl_nas.py` | Standalone Torch/Optuna neural architecture experiment. |
 | `hpo_optuna.py` | Older Optuna/W&B HPO implementation. |
 | `multi_objective.py` | Experimental accuracy/time/complexity utility. |
 | `weight_search.py` | Multi-objective weight sweep/report script. |
@@ -730,13 +791,11 @@ ignore rules prevent equivalent new files from being added accidentally.
 | `metaautoml/ensembles/embedding_cache.py` | PyArrow/Torch embedding cache experiment. |
 | `metaautoml/ensembles/oof_stacking.py` | Experimental OOF stacker. |
 | `metaautoml/evaluation/calibration_shap.py` | W&B calibration/SHAP experiment. |
-| `metaautoml/nas/downstream_nas.py` | Optuna downstream NAS experiment. |
-| `metaautoml/nas/regularized_objective.py` | Regularized booster/MLP objective. |
 | `metaautoml/pipelines/autodl_router.py` | Experimental AutoDL route. |
 | `metaautoml/pipelines/automl_router.py` | Experimental tabular router. |
 | `metaautoml/pipelines/stacking_integration.py` | Experimental diverse stacking integration. |
 
-### Redundant or Unsafe Repository Artifacts
+### Removed or Ignored Repository Artifacts
 
 | File/path | Why it should not be source |
 |---|---|
@@ -766,15 +825,13 @@ ignore rules prevent equivalent new files from being added accidentally.
 - Model and metrics writes are atomic.
 - Every normal run produces reproducibility and resource metadata.
 - LLM/report failures degrade gracefully instead of losing the trained model.
-- The package boundary is explicit and excludes the historical prototype
-  modules; prior wheel and source-distribution builds completed successfully.
+- The package boundary and active repository contain only maintained runtime,
+  compatibility, test, documentation, and packaged Studio files.
 
 ## 14. Weaknesses and Remaining Risks
 
 | Risk | Impact | Current mitigation / next step |
 |---|---|---|
-| Legacy files remain in the Git worktree | Confuses maintainers and expands attack/dependency surface | Excluded from wheel; delete exact approved set. |
-| `.gitconfig` contains personal identity | Privacy and machine-specific configuration risk | Remove it from version control before publishing the repository. |
 | Capitalized compatibility requires early aliasing | Without package-name canonicalization, Windows can load duplicate classes under `AutoNexus.*` and `autonexus.*` | Both names are registered before canonical submodule imports; tests cover canonical-first and capitalized-first import order. |
 | Version `0.1.0` vision finalization can raise after successful training | Object-typed NPZ feature names are rejected by NumPy's safe loader, leaving framework and drift metadata incomplete | Version `0.1.1` writes Unicode arrays and safely recovers old bundles from the persisted predictor schema without enabling pickle. |
 | `--max-time` is cooperative | A single estimator fit can exceed the budget | Documented; hard isolation would require subprocess workers. |
@@ -787,23 +844,32 @@ ignore rules prevent equivalent new files from being added accidentally.
 | Calibration uses one internal split | Small datasets can produce noisy temperature estimates | Skip when data is insufficient; accept only non-worsening NLL. |
 | RAM peak is platform-dependent | Some platforms expose only current RSS | Manifest labels both current and peak; use container telemetry in production. |
 | VRAM metrics require CUDA Torch | CPU systems report N/A/zero | Expected and surfaced explicitly. |
-| Meta-memory is local retrieval, not automatic transfer | Neighbors are available, but blindly biasing model selection could amplify historical mistakes | Keep retrieval advisory until benchmarked routing and anti-memory penalties show consistent out-of-sample benefit. |
+| Meta-memory advice can amplify historical mistakes | Nearby success/failure evidence may not transfer to a new domain | Distance/version/task gates, current-baseline vetoes, family diversity, and persisted retrieval provenance keep routing advisory. |
 | Default memory contribution is an operational policy choice | Sanitized run metadata may still be unsuitable for some regulated environments | Raw data and clear-text paths are excluded; use `contribute_memory=False` or an isolated `memory_dir`. |
-| Incremental learning is estimator-dependent | Tree ensembles and vision adapters cannot safely use generic `partial_fit` | Capability detection returns `retrain_required`; use the online SGD preset or an explicit challenger retrain. |
+| Incremental learning is estimator-dependent | Tree ensembles and vision adapters cannot safely use generic `partial_fit` | `strategy="auto"` uses `partial_fit` only when valid and otherwise gates an immutable retrained tabular challenger; vision still requires adapter/retraining workflows. |
 | Automatic drift-triggered updates can react to transient shifts | A short-lived batch may not justify promotion | Require labels, a holdout gate, minimum batch sizes, monitoring thresholds, and human approval for high-risk systems. |
+| Population drift is undefined for undersized batches | One observation can look constant or unlike the reference distribution | Batches below `minimum_samples` run schema/type checks only and return `insufficient_data`; population, prediction, and performance alarms remain gated. |
 | Real pretrained-model downloads are excluded from standard CI | Upstream model-host or weight failures are not exercised on every commit | Mocked public-API vision finalization and Transformers output tests cover package integration; run a clean TestPyPI image smoke test before release. |
 | Joblib model loading executes Python objects | Untrusted model files are unsafe | Load only artifacts produced by trusted runs. |
+| Firebase protects application-level ownership, not worker/OS isolation | A hostile workload could still compete for shared CPU, RAM, VRAM, or disk | Remote users are upload-only, all APIs are UID-scoped, and non-loopback launch requires Firebase; production SaaS still needs quotas and isolated workers. |
+| BYOK secrets live in process memory until a queued mission starts | A privileged process-memory inspector could access active credentials | Use a trusted local machine, keep the queue short, and use scoped/revocable provider keys. |
+| Web jobs execute in the application process | A process restart interrupts active work and Python threads cannot safely cancel model training | Mission state is persisted and interrupted work is surfaced; durable external queues are future deployment work. |
+| Browser uploads duplicate input data inside the run workspace | Very large image folders can consume disk and transfer time | Prefer local-path mode for large datasets and enforce `AUTONEXUS_MAX_UPLOAD_MB`. |
+| One-click deployment is process-local | Restarting Studio disables the endpoint and it is not a managed cloud deployment | The archive marks deployments inactive on restart; use container/managed deployment for durable production traffic. |
+| Firebase credentials are deployment-specific | Login cannot become active from source code alone | Configure Email/Password, public Web app values, and server-side Admin credentials before non-loopback launch. |
 | XLS parsing adds an old-format dependency | Extra base dependency for a legacy format | Drop XLS if only modern XLSX is required. |
 
 ## 15. Production Readiness Assessment
 
 The runtime architecture is production-oriented for local and batch AutoML.
-Version `0.1.0` is published on PyPI; the current source is the `0.1.1` patch
-release candidate.
+Versions `0.1.0` and `0.1.1` are published on PyPI. The current source is the
+`0.2.0` feature line that adds a local-first Web Studio with optional Firebase
+identity and owner isolation over the public SDK.
 
-Verification on 2026-08-03 produced this exact source status:
+Verification on 2026-08-04 produced this source status:
 
-- Pytest collected 25 production tests: all 25 passed.
+- The source suite covers the production framework, notebook, splitting,
+  calibration, and Web control-plane contracts.
 - Framework lifecycle, drift, local memory, mandatory artifacts, grouped image
   splitting, backbone selection/fallback logic, calibration, and executable
   notebook tests passed.
@@ -814,21 +880,29 @@ Verification on 2026-08-03 produced this exact source status:
   Transformers pooling outputs returned by CLIP-family models.
 - The shared engine configures UTF-8-safe standard streams for both SDK and CLI
   execution, preventing Windows CP1252 crashes in Unicode progress output.
+- Web tests cover upload path traversal rejection, Firebase authentication and
+  owner isolation, remote local-path denial, dataset inspection, typed mission
+  validation, atomic run persistence, multipart upload, background completion,
+  allowlisted artifact download, BYOK credential separation/redaction, and
+  post-run secret removal.
+- Headless Edge acceptance checks cover the overview, mission composer, fixed
+  header/deep-link behavior, desktop layout, and mobile navigation/layout.
 
-Remaining `0.1.1` release gates, in order:
+Remaining `0.2.0` release gates, in order:
 
-1. Build fresh `0.1.1` wheel and source-distribution files without reusing the
-   immutable `0.1.0` artifacts.
-2. Run `twine check`, inspect wheel/sdist contents, and install the wheel into
-   a clean environment.
-3. Publish to TestPyPI and run tabular plus image public-API smoke tests.
-4. Record SHA-256 hashes, publish the exact tested files to PyPI, tag `v0.1.1`,
-   and verify installation from the production index.
+1. Run the full source suite, including Web Studio lifecycle tests, and perform
+   manual desktop/mobile browser acceptance checks.
+2. Build fresh `0.2.0` wheel and source-distribution files and verify that all
+   packaged HTML, CSS, and JavaScript assets are present.
+3. Run `twine check`, install `AutoNexus[serve]` from the wheel into a clean
+   environment, and complete one browser-initiated tabular training mission.
+4. Publish the exact artifacts to TestPyPI and repeat Web, CLI, SDK, tabular,
+   and image smoke tests before production publication and tag `v0.2.0`.
 
-The package boundary is isolated from historical prototypes, the root license
-is valid, the Git remote targets `dineshmc1/AutoNexus`, and the complete source
-suite is green. The remaining work is clean distribution verification and
-registry promotion.
+The package boundary remains isolated from historical prototypes and the root
+license is valid. The Studio supports trusted local use and Firebase-backed
+owner isolation; internet-facing multi-user hosting still requires durable
+queues, storage quotas, network controls, and isolated workers.
 
 ## 16. Summary
 
@@ -850,6 +924,6 @@ logistic control, validation-gated family diversity, early stopping, LoRA
 weight decay, and non-worsening temperature scaling.
 
 The production runtime is unified, and the old experimental stack has no
-runtime role in the declared distribution. Version `0.1.1` should be promoted
-only after the fresh distribution and TestPyPI verification gates in Section
+runtime role in the declared distribution. Version `0.2.0` should be promoted
+only after the Web Studio and fresh-distribution verification gates in Section
 15 are complete.

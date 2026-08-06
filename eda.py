@@ -67,7 +67,7 @@ def plot_target_distribution(
     fig.tight_layout()
     fig.savefig(path, dpi=150)
     plt.close(fig)
-    print(f"[EDA] Saved target distribution → {path}")
+    print(f"[EDA] Saved target distribution -> {path}")
     return path
 
 
@@ -103,7 +103,7 @@ def plot_feature_distributions(
     fig.tight_layout()
     fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
-    print(f"[EDA] Saved feature distributions → {path}")
+    print(f"[EDA] Saved feature distributions -> {path}")
     return path
 
 
@@ -125,7 +125,7 @@ def plot_correlation_heatmap(X: pd.DataFrame, path: str) -> str:
     fig.tight_layout()
     fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
-    print(f"[EDA] Saved correlation heatmap → {path}")
+    print(f"[EDA] Saved correlation heatmap -> {path}")
     return path
 
 

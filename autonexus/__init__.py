@@ -21,6 +21,7 @@ from autonexus.data import (
     SQLSource,
 )
 from autonexus.drift import DriftBaseline, DriftDetector, DriftReport, DriftSignal
+from autonexus.deployment import DeploymentHandle
 from autonexus.llm import (
     CallableLLMProvider,
     HTTPJSONProvider,
@@ -51,6 +52,7 @@ __all__ = [
     "DriftDetector",
     "DriftReport",
     "DriftSignal",
+    "DeploymentHandle",
     "Event",
     "FAISSMetaMemory",
     "FileSource",
@@ -77,4 +79,4 @@ __all__ = [
     "plugins",
 ]
 
-__version__ = "0.1.1"
+__version__ = "0.2.0"

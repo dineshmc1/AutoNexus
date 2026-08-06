@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import textwrap
+import zipfile
 from pathlib import Path
 
 
@@ -18,13 +19,22 @@ def generate_advanced_notebook(
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     analytics = results.get("analytics_paths", {})
-    analysis_dir = Path(
+    original_analysis_dir = Path(
         analytics.get("analysis_dir", output.parent / "analysis_data")
     ).resolve()
-    metrics_path = Path(results["metrics_path"]).resolve()
-    model_path = Path(results["model_path"]).resolve()
+    run_root = output.parent.resolve()
+
+    def portable_path(value: str) -> str:
+        resolved = Path(value).resolve()
+        try:
+            return str(resolved.relative_to(run_root))
+        except ValueError:
+            return str(resolved)
+
+    metrics_path = portable_path(results["metrics_path"])
+    model_path = portable_path(results["model_path"])
     plot_paths = [
-        str(Path(path).resolve())
+        portable_path(path)
         for path in results.get("plot_paths", [])
         if path
     ]
@@ -92,7 +102,25 @@ def generate_advanced_notebook(
             pd.set_option("display.max_columns", 120)
             pd.set_option("display.max_rows", 200)
 
-            ANALYSIS_DIR = Path({json.dumps(str(analysis_dir))})
+            BUNDLE_ROOT = Path.cwd()
+            ORIGINAL_ANALYSIS_DIR = Path({json.dumps(str(original_analysis_dir))})
+            analysis_candidates = [
+                BUNDLE_ROOT / "analysis_data",
+                ORIGINAL_ANALYSIS_DIR,
+            ]
+            ANALYSIS_DIR = next(
+                (
+                    path for path in analysis_candidates
+                    if (path / "run_context.json").is_file()
+                ),
+                None,
+            )
+            if ANALYSIS_DIR is None:
+                raise FileNotFoundError(
+                    "analysis_data is missing. Download and extract the "
+                    "Analytics Bundle, then open analysis.ipynb from the "
+                    "extracted directory."
+                )
             CONTEXT_PATH = ANALYSIS_DIR / "run_context.json"
             context = json.loads(CONTEXT_PATH.read_text(encoding="utf-8"))
             summary = context["summary"]
@@ -382,7 +410,21 @@ def generate_advanced_notebook(
             embedding = np.load(
                 ANALYSIS_DIR / "embedding_sample.npz", allow_pickle=False
             )
-            embedding_X = embedding["X"].astype(np.float32)
+            embedding_frame = pd.DataFrame(
+                embedding["X"].astype(np.float32)
+            ).replace([np.inf, -np.inf], np.nan)
+            non_finite_values = int(embedding_frame.isna().sum().sum())
+            embedding_X = (
+                embedding_frame
+                .fillna(embedding_frame.median(numeric_only=True))
+                .fillna(0.0)
+                .to_numpy(dtype=np.float32)
+            )
+            if non_finite_values:
+                display(Markdown(
+                    f"**Projection preprocessing:** median-imputed "
+                    f"{non_finite_values:,} non-finite embedding values."
+                ))
             embedding_y = embedding["y"]
             embedding_split = embedding["split"].astype(str)
             embedding_group = embedding["group"].astype(str)
@@ -1026,6 +1068,8 @@ def generate_advanced_notebook(
             plot_paths = {plot_paths!r}
             for plot in plot_paths:
                 path = Path(plot)
+                if not path.is_absolute():
+                    path = BUNDLE_ROOT / path
                 if path.exists():
                     print(path.name)
                     display(DisplayImage(filename=str(path)))
@@ -1048,8 +1092,8 @@ def generate_advanced_notebook(
             display(pd.Series(context["artifacts"], name="path").to_frame())
             print("Model revision:", input_metadata.get("backbone_revision"))
             print("Embedding cache:", input_metadata.get("embedding_cache", "see .cache/embeddings"))
-            print("Saved model:", Path({json.dumps(str(model_path))}))
-            print("Metrics:", Path({json.dumps(str(metrics_path))}))
+            print("Saved model:", BUNDLE_ROOT / Path({json.dumps(model_path)}))
+            print("Metrics:", BUNDLE_ROOT / Path({json.dumps(metrics_path)}))
             """
         ),
         md("## 22. Model Card"),
@@ -1120,9 +1164,41 @@ def generate_advanced_notebook(
     notebook.metadata["language_info"] = {"name": "python", "version": "3"}
     notebook.metadata["ml_builder"] = {
         "analysis_order": "pre-training-first",
-        "analytics_directory": str(analysis_dir),
+        "analytics_directory": "analysis_data",
+        "original_analytics_directory": str(original_analysis_dir),
         "expensive_analyses_bounded": True,
     }
     nbformat.write(notebook, output)
     print(f"[Notebook] Analysis notebook saved to: {output}")
     return str(output)
+
+
+def create_notebook_bundle(
+    output_dir: str | Path,
+    *,
+    notebook_path: str | Path,
+    plot_paths: list[str] | None = None,
+) -> str:
+    """Package the notebook with every bounded input it needs to execute."""
+    root = Path(output_dir).resolve()
+    notebook = Path(notebook_path).resolve()
+    destination = root / "analysis_bundle.zip"
+    members = [notebook, root / "metrics.csv"]
+    analysis_dir = root / "analysis_data"
+    if analysis_dir.is_dir():
+        members.extend(
+            path for path in analysis_dir.rglob("*") if path.is_file()
+        )
+    for value in plot_paths or []:
+        path = Path(value).resolve()
+        if path.is_file() and root in path.parents:
+            members.append(path)
+    with zipfile.ZipFile(
+        destination,
+        "w",
+        compression=zipfile.ZIP_DEFLATED,
+    ) as archive:
+        for path in dict.fromkeys(members):
+            if path.is_file() and root in path.parents:
+                archive.write(path, path.relative_to(root))
+    return str(destination)

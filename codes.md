@@ -115,21 +115,26 @@ trainer = AutoNexus(
     tune=True,
     tune_iterations=30,
     shap=True,
+    use_memory=True,
     contribute_memory=True,
 )
 model = trainer.fit("fraud.csv", target="is_fraud")
 ```
 
-## 7. Disable FAISS Memory Contribution
+## 7. Configure FAISS Search Memory
 
-Contribution is enabled by default and stores only the dataset fingerprint,
-meta-embedding, selected model, metrics, and timing. It does not store raw
-training rows.
+Retrieval and contribution are enabled by default. Retrieval advises the
+shortlist using compatible nearby runs; current validation evidence can always
+override it. Future contributions store selection evidence, not held-out test
+metrics, and never store raw training rows.
 
 ```python
 from autonexus import AutoNexus
 
-model = AutoNexus(contribute_memory=False).fit(
+model = AutoNexus(
+    use_memory=False,
+    contribute_memory=False,
+).fit(
     "private.csv", target="label"
 )
 ```
@@ -353,6 +358,10 @@ report = monitor.observe(pd.read_csv("production_batch.csv"))
 print(report.to_dict())
 ```
 
+If the batch contains fewer rows than `minimum_samples`, the report returns
+`severity="insufficient_data"` and suppresses population-level alarms. Schema
+and invalid-type checks still run immediately.
+
 ## 20. Monitoring Sinks
 
 ```python
@@ -397,8 +406,10 @@ result = model.update(new_batch, target="label")
 print(result)
 ```
 
-AutoNexus updates a candidate with `partial_fit`, evaluates it on an unseen
-gate, and promotes it only when the configured regression limit is satisfied.
+With `strategy="auto"`, AutoNexus uses `partial_fit` when it is genuinely
+supported. Trees and ensembles receive an immutable retrained challenger.
+Every candidate is evaluated on an unseen new-data gate and promoted only
+when it strictly outperforms the champion.
 
 Customize the policy:
 
@@ -408,20 +419,17 @@ from autonexus import UpdatePolicy
 policy = UpdatePolicy(
     minimum_batch_size=100,
     validation_fraction=0.25,
-    max_allowed_drop=0.002,
+    minimum_improvement=0.002,
 )
 result = model.update(new_batch, target="label", policy=policy)
 ```
 
 ## 22. Non-Incremental Model Replacement
 
-Models without `partial_fit` return `retrain_required` rather than pretending
-to support online updates:
+Force a full challenger even for an incremental estimator:
 
 ```python
-result = model.update(new_batch, target="label")
-if result.action == "retrain_required":
-    challenger = model.retrain(new_batch, target="label")
+result = model.update(new_batch, target="label", strategy="retrain")
 ```
 
 Replacement training writes a separate run under `updates/`; it does not
@@ -537,10 +545,90 @@ model.register(
 )
 ```
 
-## 29. Serve Predictions
+## 29. Launch Auto Nexus Studio
+
+Install the optional web dependencies:
+
+```powershell
+pip install "AutoNexus[serve]"
+```
+
+Launch the local training interface:
+
+```powershell
+autonexus-web
+```
+
+Choose a different run workspace and port:
+
+```powershell
+autonexus-web --workspace D:\AutoNexusRuns --port 9000
+```
+
+The Studio opens on `http://127.0.0.1:8787` by default. Runs are stored under
+`%LOCALAPPDATA%\AutoNexus\studio-runs` on Windows unless `--workspace` or
+`AUTONEXUS_WEB_WORKSPACE` is set.
+
+For Firebase-protected multi-user access:
+
+```powershell
+pip install "AutoNexus[serve,auth]"
+$env:GOOGLE_APPLICATION_CREDENTIALS="C:\secure\firebase-admin.json"
+$env:AUTONEXUS_AUTH_MODE="firebase"
+$env:AUTONEXUS_FIREBASE_API_KEY="your-web-api-key"
+$env:AUTONEXUS_FIREBASE_PROJECT_ID="your-project-id"
+$env:AUTONEXUS_FIREBASE_AUTH_DOMAIN="your-project-id.firebaseapp.com"
+$env:AUTONEXUS_FIREBASE_APP_ID="your-web-app-id"
+autonexus-web --host 0.0.0.0
+```
+
+Enable Email/Password in Firebase Authentication before launching. Remote
+users are upload-only unless the administrator deliberately sets
+`AUTONEXUS_ALLOW_REMOTE_LOCAL_PATHS=true`.
+
+In **LLM Intelligence / BYOK**, choose one of:
+
+```text
+Server environment       Uses LLM_MODEL and its provider environment key
+Bring your own API key   Choose provider, model ID, key, and optional endpoint
+Local Ollama             Choose a local model and Ollama endpoint
+Deterministic offline    Makes no external LLM request
+```
+
+BYOK keys exist only in process memory for the selected mission. They are not
+saved in browser storage, run manifests, reports, logs, or artifacts.
+
+Download **Runnable analytics bundle** from a completed mission, extract it,
+and open `analysis.ipynb` from the extracted directory. The ZIP includes the
+bounded `analysis_data` files required by the notebook.
+
+## 30. One-Line Deployment
+
+Start a safe localhost deployment in the background:
 
 ```python
-model.serve(host="0.0.0.0", port=8000)
+deployment = model.deploy()
+```
+
+Inspect `deployment.predict_url`, and stop it with `deployment.stop()`.
+Public binding requires explicit authentication and acknowledgement that TLS
+must be terminated by a trusted reverse proxy:
+
+```python
+import os
+
+deployment = model.deploy(
+    host="0.0.0.0",
+    port=8000,
+    api_key=os.environ["AUTONEXUS_API_KEY"],
+    allow_insecure_public=True,
+)
+```
+
+The original blocking development server remains available:
+
+```python
+model.serve(host="127.0.0.1", port=8000)
 ```
 
 Request:
@@ -557,7 +645,7 @@ Health endpoint:
 curl http://localhost:8000/health
 ```
 
-## 30. CLI
+## 31. CLI
 
 Interactive:
 
@@ -583,13 +671,19 @@ Disable memory contribution:
 autonexus data.csv --target label --no-contribute-memory
 ```
 
+Disable both retrieval and contribution:
+
+```powershell
+autonexus data.csv --target label --no-memory-retrieval --no-contribute-memory
+```
+
 Use a project memory:
 
 ```powershell
 autonexus data.csv --target label --memory-dir .\team_memory
 ```
 
-## 31. Production Safety Checklist
+## 32. Production Safety Checklist
 
 ```text
 1. Keep the held-out test set untouched until final evaluation.

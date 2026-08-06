@@ -80,6 +80,8 @@ class NexusConfig:
     adapt_lora: bool = False
     backbones: list[str] = field(default_factory=lambda: ["auto"])
     backbone_time_seconds: float = 900.0
+    preprocessing_cache: bool = True
+    use_memory: bool = True
     contribute_memory: bool = True
     memory_dir: Path | None = None
 
@@ -142,7 +144,8 @@ class NexusConfig:
             adapt_lora=self.adapt_lora,
             backbones=list(self.backbones),
             backbone_time_seconds=self.backbone_time_seconds,
+            preprocessing_cache=self.preprocessing_cache,
+            use_memory=self.use_memory,
             contribute_memory=self.contribute_memory,
             memory_dir=self.memory_dir,
         )
-
