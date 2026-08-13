@@ -16,11 +16,12 @@ model = AutoNexus(preset="balanced").fit("data.csv", target="label")
 predictions = model.predict("unseen.csv")
 ```
 
-> **Project status:** The current source targets AutoNexus `0.2.0`; `0.1.1` is
-> the latest published framework release. The packaged runtime is
-> designed for local and batch experimentation, but users should independently
-> validate models, data splits, licenses, and operational controls before
-> deploying them in high-risk environments.
+> **Project status:** AutoNexus `0.3.0` is published on PyPI and tagged in this
+> repository. The packaged runtime supports tabular and image learning. Text,
+> audio, video, and cross-modal fusion are documented roadmap architectures,
+> not released training modes. The Docker image and hosted Vercel/Railway
+> topology still require deployment-specific acceptance testing before they
+> should be treated as production infrastructure.
 
 ## Contents
 
@@ -88,11 +89,15 @@ monitoring, gated incremental updates when the estimator supports
 
 ## Supported Scope
 
-| Modality | Training input | Tasks | Target definition |
-|---|---|---|---|
-| Tabular | `pandas.DataFrame`, CSV, XLSX, XLS | Classification and regression | Required target column |
-| Vision | Image folder hierarchy | Classification | Class-folder names |
-| Batch/stream source | DataFrame batches, CSV, Excel, Parquet, Python iterables, SQL, Kafka/Redpanda | Initial tabular training and monitoring | Required for supervised training or labelled monitoring |
+| Modality | Status in `0.3.0` | Training input | Tasks | Target definition |
+|---|---|---|---|---|
+| Tabular | Implemented | `pandas.DataFrame`, CSV, XLSX, XLS | Classification and regression | Required target column |
+| Image | Implemented | Image folder hierarchy | Classification | Class-folder names |
+| Batch/stream source | Implemented for tabular lifecycle workflows | DataFrame batches, CSV, Excel, Parquet, Python iterables, SQL, Kafka/Redpanda | Initial tabular training and monitoring | Required for supervised training or labelled monitoring |
+| Text | Planned | Document table/manifest or class-named document folders | Initial target: classification | Explicit label or class folder |
+| Audio | Planned | Audio manifest or class-named audio folders | Initial target: classification | Explicit label or class folder |
+| Video | Planned | Video manifest or class-named video folders | Initial target: classification | Explicit label or class folder |
+| Multimodal | Planned | Entity-aligned combinations of supported modalities | Task-specific | Shared entity-level target |
 
 Image training supports either class folders directly or explicit
 `train`/`val`/`test` directories:
@@ -115,8 +120,10 @@ selection. Without explicit splits, AutoNexus attempts to infer repeated
 subject, video-folder, or frame-sequence groups. Reliable groups remain
 disjoint; otherwise, the system uses a stratified image split.
 
-Audio, video, text, executable-file analysis, neural architecture search, and
-distributed multi-node training are outside the packaged `0.2.0` runtime.
+Audio, video, semantic text learning, multimodal fusion, executable-file
+analysis, neural architecture search, and distributed multi-node training are
+outside the packaged `0.3.0` runtime. Their diagrams below define safe extension
+boundaries and do not imply callable SDK or CLI support.
 
 ## System Architecture
 
@@ -125,30 +132,64 @@ and call the same training engine. This avoids separate implementations for
 interactive and programmatic use.
 
 ```mermaid
-flowchart LR
+flowchart TB
     Browser[Browser user] --> Studio[Auto Nexus Studio]
     User[Terminal user] --> CLI[AutoNexus CLI]
     App[Python application] --> SDK[AutoNexus SDK]
-    Studio --> Engine[Unified training engine]
-    CLI --> Engine[Unified training engine]
-    SDK --> Engine
+    Studio --> Contract[Validated RunConfig]
+    CLI --> Contract
+    SDK --> Contract
+    Contract --> Engine[Unified training engine]
 
-    Engine --> Input{Input modality}
-    Input -->|Tabular| Tabular[Validation and preprocessing]
-    Input -->|Images| Vision[Split and backbone tournament]
-    Tabular --> Search[Downstream AutoML]
-    Vision --> Search
+    Engine --> Router{Modality router}
+    Router -->|implemented| Tabular[Tabular adapter]
+    Router -->|implemented| Image[Image adapter]
+    Router -.->|planned| Text[Text adapter]
+    Router -.->|planned| Audio[Audio adapter]
+    Router -.->|planned| Video[Video adapter]
+    Router -.->|planned| Fusion[Multimodal fusion adapter]
 
+    Tabular --> Search[Shared downstream AutoML]
+    Image --> Search
+    Text -.-> Search
+    Audio -.-> Search
+    Video -.-> Search
+    Fusion -.-> Search
     Search --> Gate[Validation-only selection and calibration]
-    Gate --> Test[Held-out test evaluation]
-    Test --> Bundle[Reproducible run bundle]
+    Gate --> Test[One held-out test evaluation]
+    Test --> Bundle[Immutable model and evidence bundle]
 
-    Bundle --> Predict[Inference]
-    Bundle --> Monitor[Drift monitoring]
-    Bundle --> Registry[Registry and rollback]
-    Monitor --> Update[Gated update or retraining]
+    Bundle --> Predict[Inference and deployment]
+    Bundle --> Monitor[Drift and performance monitoring]
+    Bundle --> Registry[Version registry and rollback]
+    Monitor --> Update[Gated incremental update or challenger retraining]
     Update --> Registry
 ```
+
+Solid arrows represent released `0.3.0` paths. Dashed arrows are proposed
+extension contracts whose loaders, representations, predictors, analytics, and
+acceptance tests do not yet exist.
+
+### Deployment Topology
+
+```mermaid
+flowchart LR
+    U[Authenticated browser] --> V[Vercel static Studio]
+    V -->|Firebase ID token and HTTPS| R[Railway FastAPI control plane]
+    R --> DB[(SQLite on /data)]
+    R --> FS[Railway volume datasets and artifacts]
+    R -. optional mirror .-> FBS[Firebase Storage]
+    FA[Firebase Authentication] --> U
+    FA -->|Admin token verification| R
+    U -->|ephemeral pairing token| A[Local AutoNexus agent]
+    A -->|per-run permission| GPU[Local CPU or GPU]
+    A --> L[(Local SQLite, datasets, and artifacts)]
+```
+
+Vercel contains no Python training runtime. Railway is the hosted identity and
+control-plane boundary, while the paired local agent is the only component that
+can use a user's local GPU. A fully local deployment can run `autonexus-web`
+without Vercel, Railway, or Firebase.
 
 ### Architectural Principles
 
@@ -159,6 +200,113 @@ flowchart LR
 5. **Evidence-gated complexity:** LoRA and ensembles are accepted only when development evidence supports them.
 6. **Artifact-first execution:** configuration, metrics, resources, provenance, and outputs are persisted for every successful run.
 7. **Capability-aware lifecycle:** incremental updates occur only for models that support a safe `partial_fit` path.
+
+### Modality Pipelines
+
+#### Tabular Pipeline (Implemented)
+
+```mermaid
+flowchart LR
+    A[DataFrame, CSV, or Excel] --> B[Schema and target validation]
+    B --> C[Development/test split]
+    C --> D[Development-only ID inference and data audit]
+    D --> E[Fold-local imputation, encoding, scaling, and feature engineering]
+    E --> F[Landmark screen, CV, and optional HPO]
+    F --> G[Ensemble and calibration gate]
+    G --> H[Final development fit]
+    H --> I[One held-out test]
+    I --> J[Predictor, notebook, report, manifest, and drift baseline]
+```
+
+#### Image Pipeline (Implemented)
+
+```mermaid
+flowchart LR
+    A[Class folders or explicit splits] --> B[File, quality, duplicate, and group audit]
+    B --> C[Split image paths before model loading]
+    C --> D[Frozen backbone tournament]
+    D --> E[Optional winner-only LoRA candidate]
+    E --> F[Frozen/adapted development gate]
+    F --> G[Split-aware FP16 embedding cache]
+    G --> H[Shared downstream AutoML]
+    H --> I[Calibration and one held-out test]
+    I --> J[Vision predictor and evidence bundle]
+```
+
+#### Text Pipeline (Planned)
+
+```mermaid
+flowchart LR
+    A[Documents or labelled text manifest] --> B[Language, length, duplicate, source, and sensitive-data audit]
+    B --> C[Author, thread, source, group, or time split]
+    C --> D[TF-IDF landmark versus frozen language embeddings]
+    D --> E[Optional winner-only PEFT or LoRA gate]
+    E --> F[Freeze tokenizer, vocabulary, and model revision]
+    F --> G[Shared AutoML or validated text head]
+    G --> H[Calibration and held-out document test]
+    H --> I[Text predictor, attribution, monitoring, and artifacts]
+```
+
+Fitting token statistics or adapters before splitting would leak document
+information. A text column handled by the current generic tabular preprocessor
+is not a semantic NLP pipeline.
+
+#### Audio Pipeline (Planned)
+
+```mermaid
+flowchart LR
+    A[Audio files or labelled manifest] --> B[Codec, duration, sample-rate, channel, clipping, and noise audit]
+    B --> C[Speaker, session, recording, source, or time split]
+    C --> D[Segment only after the split]
+    D --> E[Acoustic landmark versus pretrained audio encoders]
+    E --> F[Optional winner-only adaptation gate]
+    F --> G[Clip-to-recording aggregation]
+    G --> H[Calibration and held-out recording test]
+    H --> I[Audio predictor, temporal evidence, and artifacts]
+```
+
+The first safe scope would be supervised audio classification. Speech
+recognition, diarization, source separation, and generation require different
+targets, metrics, decoders, and artifact contracts and should not be hidden
+behind one generic audio task.
+
+#### Video Pipeline (Planned)
+
+```mermaid
+flowchart LR
+    A[Video files or labelled manifest] --> B[Codec, duration, FPS, resolution, corruption, and source audit]
+    B --> C[Video, subject, session, camera, or time split]
+    C --> D[Sample clips and frames after splitting]
+    D --> E[Frame-pooling landmark versus temporal backbones]
+    E --> F[Optional winner-only adaptation gate]
+    F --> G[Clip-to-video aggregation]
+    G --> H[Calibration and held-out video test]
+    H --> I[Video predictor, temporal evidence, and artifacts]
+```
+
+Extracted frames must never be split independently because adjacent frames can
+make held-out performance severely optimistic. The current image path may train
+on extracted frames only when reliable source-video groups remain disjoint; it
+does not perform temporal video understanding.
+
+#### Multimodal Fusion Pipeline (Planned)
+
+```mermaid
+flowchart LR
+    A[Entity-aligned tabular, image, text, audio, or video inputs] --> B[Validate entity IDs, timestamps, labels, and missing modalities]
+    B --> C[Create one shared entity/group/time split]
+    C --> D[Fit each modality adapter on development data only]
+    D --> E[Late-fusion landmark]
+    D --> F[Optional learned fusion candidate]
+    E --> G[Validation, calibration, latency, and missing-modality gate]
+    F --> G
+    G --> H[One entity-level held-out test]
+    H --> I[Composite predictor and lineage bundle]
+```
+
+Fusion must preserve a common entity-level test firewall. Independently
+splitting each modality could place different observations from the same person,
+session, or source on both sides of the boundary.
 
 ## Methodology
 
@@ -291,6 +439,7 @@ test performance are recorded as distinct quantities.
 | Monitoring | JSONL, logging, webhooks, and optional Prometheus metrics |
 | Streaming and data access | pandas batches, SQL/DB-API, Kafka/Redpanda, PyArrow |
 | Web Studio and serving | FastAPI, Uvicorn, multipart upload handling, packaged HTML/CSS/JavaScript |
+| Hosted topology | Vercel static frontend, Railway control plane and volume, Firebase Authentication, optional Firebase Storage |
 | Packaging and tests | `pyproject.toml`, uv, setuptools, pytest |
 
 Heavy capabilities are optional and imported lazily. A core tabular run does
@@ -300,10 +449,10 @@ not require Torch, Transformers, FAISS, SHAP, an LLM client, or a web server.
 
 ### From PyPI
 
-After the distribution is published:
+Install the published `0.3.0` release:
 
 ```bash
-pip install AutoNexus
+pip install "AutoNexus==0.3.0"
 ```
 
 Install only the capabilities required by the application:
@@ -917,6 +1066,8 @@ third-party `fit`, model download, or active embedding batch.
 | Local filesystem registry | It is not a distributed model-governance service | Use external access control and artifact storage in production |
 | Pickle-compatible deployment | Untrusted artifacts are unsafe | Load trusted run bundles only |
 | Limited empirical evaluation | Two single-run image case studies cannot establish general superiority | Add repeated, controlled, multimodal benchmarks |
+| Text, audio, video, and multimodal adapters are architectural plans only | Their file formats, representations, predictors, analytics, and monitoring paths are unavailable in `0.3.0` | Implement and independently validate one modality at a time before advertising support |
+| Hosted Docker/Vercel/Railway topology is not yet acceptance-tested in this release process | Local tests cannot establish cloud persistence, authentication, CORS, browser-to-loopback, or restart behavior | Complete the deployment checklist in `DEPLOYMENT.md` before public use |
 
 AutoNexus does not replace domain review, causal leakage analysis, fairness
 assessment, security testing, or regulatory validation.
@@ -935,6 +1086,10 @@ The highest-priority extensions are:
 8. External registry and object-storage adapters with authentication and audit controls.
 9. Dedicated vision adaptation jobs for new labelled batches rather than generic incremental updates.
 10. Broader controlled evaluation of the analytics notebook as a data-quality and debugging instrument.
+11. A leakage-safe text-classification adapter with duplicate-aware document splitting, sparse landmarks, frozen language embeddings, and gated PEFT.
+12. A recording-level audio-classification adapter with speaker/session isolation, bounded segmentation, and temporal aggregation.
+13. A video-classification adapter with source-video splitting, deterministic clip sampling, spatial-temporal representation search, and video-level evaluation.
+14. Entity-aligned late fusion only after individual modality adapters and missing-modality behavior are independently validated.
 
 ## Development and Testing
 
@@ -947,8 +1102,8 @@ uv run --no-sync pytest
 Build and validate the distribution:
 
 ```bash
-uv build
-uvx twine check dist/autonexus-0.2.0-py3-none-any.whl dist/autonexus-0.2.0.tar.gz
+uv build --no-sources
+uvx twine check dist/autonexus-0.3.0-py3-none-any.whl dist/autonexus-0.3.0.tar.gz
 ```
 
 The tests cover the public framework lifecycle, mandatory artifacts, drift,

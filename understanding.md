@@ -9,7 +9,7 @@ training engine:
 - `main.py`, `autonexus`, and `ml-builder` expose the same engine as a CLI.
 - `autonexus-web` launches the local Auto Nexus Studio for browser users.
 
-The current source declares version `0.2.0`, author `Dinesh`, and
+The current source declares version `0.3.0`, author `Dinesh`, and
 the SPDX license expression `Apache-2.0`. The canonical, cross-platform Python
 import is `from autonexus import AutoNexus`. The capitalized `import AutoNexus`
 compatibility path is also supported: package initialization aliases both
@@ -34,8 +34,11 @@ Every successful run has a strict artifact contract: `run.json`, `model.pkl`,
 The production distribution is explicitly declared in `pyproject.toml`.
 Historical W&B, agentic, NAS, and superseded meta-learning prototypes were
 removed from the active source tree and remain recoverable from Git history.
-Versions `0.1.0` and `0.1.1` are published; `0.2.0` adds the packaged local
-Web Studio.
+Versions `0.1.0` through `0.3.0` are published on PyPI. Version `0.3.0` adds
+the hybrid Vercel/Railway boundary, Firebase-backed owner isolation, SQLite and
+filesystem persistence, and a permission-gated local CPU/GPU agent. The Docker
+image and hosted topology are implemented in source but have not yet completed
+deployment-specific acceptance testing.
 
 ## 2. System Boundary
 
@@ -51,11 +54,15 @@ flowchart LR
     Input -->|CSV / Excel| Tabular[Tabular loader]
     Input -->|Directory| Vision[Grouped split and automatic backbone tournament]
     Input -.->|planned text adapter| Text[Document audit, grouped split, language representation]
+    Input -.->|planned audio adapter| Audio[Recording audit, source split, acoustic representation]
     Input -.->|planned video adapter| Video[Video audit, source split, spatial-temporal representation]
+    Input -.->|planned aligned fusion| Fusion[Entity-level multimodal adapter]
     Tabular --> AutoML[Unified AutoML path]
     Vision --> AutoML
     Text -.-> AutoML
+    Audio -.-> AutoML
     Video -.-> AutoML
+    Fusion -.-> AutoML
     AutoML --> Selection[Validation-only selection]
     Selection --> Test[One final held-out test]
     Test --> Artifacts[Model, metrics, manifest, reports]
@@ -77,7 +84,9 @@ boundaries, not currently available training modes.
 | Tabular | Implemented | CSV, XLSX, or XLS with an explicit target column |
 | Image | Implemented for classification | Class-named folders with explicit or automatic splits |
 | Text | Planned, not implemented | Requires a document/manifest loader, text-aware audit, grouped splitter, and representation registry |
+| Audio | Planned, not implemented | Requires decoding, recording-level splitting, bounded segmentation, acoustic representations, and temporal aggregation |
 | Video | Planned, not implemented | Requires video decoding, clip sampling, source-aware splitting, and a spatial-temporal backbone registry |
+| Multimodal fusion | Planned, not implemented | Requires entity alignment, one shared split, independently validated modality adapters, and missing-modality policies |
 
 ## 3. Main Execution Path
 
@@ -318,7 +327,61 @@ dependencies; model-revision pinning; and dedicated tests. It must not be
 presented as supported until those pieces and real-dataset acceptance tests are
 complete.
 
-### 4.5 Planned Video Dataset Pipeline (Not Implemented)
+### 4.5 Planned Audio Dataset Pipeline (Not Implemented)
+
+AutoNexus does not currently decode audio, extract acoustic representations, or
+aggregate segment predictions. Treating precomputed audio statistics as tabular
+features is possible, but it does not constitute an audio pipeline. The first
+bounded production target should be supervised recording-level classification;
+automatic speech recognition, speaker diarization, source separation, retrieval,
+and generation need separate task and artifact contracts.
+
+```mermaid
+flowchart TD
+    A[Audio files, class folders, or labelled manifest] --> B[Probe codec, duration, sample rate, channels, clipping, silence, noise, and labels]
+    B --> C[Derive speaker, recording, session, device, source, and time groups]
+    C --> D{Explicit train, validation, and test?}
+    D -->|yes| E[Honor partitions and reject cross-split group overlap]
+    D -->|no| F[Group- or time-aware split at original-recording level]
+    E --> G[Development recordings]
+    F --> G
+    E --> H[Untouched test recordings]
+    F --> H
+    G --> I[Deterministic bounded segment sampler]
+    I --> J[Development-only representation tournament]
+    J --> K[Log-mel or MFCC linear landmark]
+    J --> L[Frozen pretrained acoustic or audio-language encoder]
+    J --> M[Optional winner-only PEFT or LoRA candidate]
+    K --> N[Accuracy, NLL, latency, RAM, and VRAM gate]
+    L --> N
+    M --> N
+    N --> O[Freeze decoder, resampler, segment policy, revision, and representation]
+    O --> P[Segment embeddings and validated recording-level aggregation]
+    P --> Q[Unified downstream AutoML and calibration]
+    Q --> R[Single held-out recording-level test]
+    R --> S[Predictor, temporal evidence, audit, notebook, and manifest]
+```
+
+The split must be created before segmentation. Randomly splitting chunks from
+one recording, speaker, session, or acoustic environment would allow highly
+correlated waveforms into development and test. Any resampling statistics,
+normalization, augmentation policy, vocabulary, adapter, reducer, or aggregation
+rule must be fitted or selected from development data only.
+
+An audio predictor would persist decoding and resampling parameters, segment
+length/stride, silence policy, representation revision, label map, aggregation
+rule, and calibration layer. Analytics should include duration, sample-rate,
+channel, loudness, clipping, silence, signal-to-noise, spectrogram, source/group,
+temporal confidence, error-segment, and calibration diagnostics. Cache identity
+must include the source hash, decoder and resampler versions, segment timestamps,
+augmentation policy, backbone revision, and adapter digest.
+
+Implementation requires an audio loader/decoder, streaming segment sampler,
+recording-aware splitter, acoustic backbone registry, aggregation and predictor
+contracts, resource controls, notebook sections, optional dependencies, and
+real-dataset tests. None of these components are shipped in `0.3.0`.
+
+### 4.6 Planned Video Dataset Pipeline (Not Implemented)
 
 The current image grouping logic can recognize likely frame sequences to keep
 related images together, but AutoNexus does not decode video files or train a
@@ -374,6 +437,48 @@ and decoding throughput also require separate budgets from the image pipeline.
 Until those components exist, a folder of extracted frames can only use the
 image classifier and must retain reliable video groups; it is not equivalent to
 video understanding.
+
+### 4.7 Planned Multimodal Fusion Pipeline (Not Implemented)
+
+Multimodal learning should be added only after each participating adapter has a
+stable inference and evidence contract. The core safety rule is one shared
+entity/group/time split across every modality; independently splitting tables,
+images, documents, recordings, or videos can leak observations from the same
+person, session, source, or event across the test firewall.
+
+```mermaid
+flowchart TD
+    A[Entity-aligned modality manifest] --> B[Validate entity IDs, timestamps, labels, provenance, consent, and modality availability]
+    B --> C[Audit duplicates, cross-modal leakage, and missing-modality patterns]
+    C --> D[Create one entity-, group-, or time-aware development/test split]
+    D --> E[Fit tabular adapter on development entities]
+    D -.-> F[Fit validated text adapter on development entities]
+    D -.-> G[Fit validated image/audio/video adapters on development entities]
+    E --> H[Out-of-fold modality predictions or embeddings]
+    F -.-> H
+    G -.-> H
+    H --> I[Late-fusion landmark]
+    H --> J[Optional learned fusion candidate]
+    I --> K[Generalization, calibration, latency, and missing-modality gate]
+    J --> K
+    K --> L[Freeze adapters, alignment schema, fusion rule, and fallback policy]
+    L --> M[Single entity-level held-out test]
+    M --> N[Composite predictor, lineage, monitoring, and artifact bundle]
+```
+
+Late fusion is the safer first implementation because modality-specific models
+remain independently testable and missing inputs can have explicit fallbacks.
+Learned fusion should be a gated challenger, trained on out-of-fold development
+predictions or embeddings rather than in-sample outputs. Evaluation must include
+complete-case performance, each missing-modality scenario, group slices,
+calibration, latency, and the incremental value of every modality.
+
+The composite predictor would need an alignment schema, per-modality artifact
+references and revisions, synchronized preprocessing, missing/late data policy,
+fusion weights or model, calibration, and lineage fingerprints. Drift monitoring
+must distinguish individual modality drift, alignment drift, availability drift,
+and final performance degradation. This architecture is a roadmap boundary only;
+`0.3.0` has no multimodal router or fusion estimator.
 
 ## 5. Image Backbone, Embedding, and LoRA Workflows
 
@@ -816,7 +921,7 @@ These are the modules explicitly included in the wheel by `pyproject.toml`.
 
 | File | Meaning |
 |---|---|
-| `pyproject.toml` | Canonical `AutoNexus` `0.2.0` metadata, author, Apache-2.0 SPDX declaration, base/optional dependencies, CLI/Web entrypoints, packaged static assets, explicit wheel module list, and pytest settings. |
+| `pyproject.toml` | Canonical `AutoNexus` `0.3.0` metadata, author, Apache-2.0 SPDX declaration, base/optional dependencies, CLI/Web/agent entrypoints, packaged static assets, explicit wheel module list, and pytest settings. |
 | `uv.lock` | Exact reproducible dependency resolution for base and optional extras. |
 | `README.md` | Publication-quality project overview with abstract, architecture, methodology, API/CLI usage, artifact contract, qualified case-study results, limitations, future work, references, and license status. |
 | `understanding.md` | This architecture and operational reference. |
@@ -876,9 +981,10 @@ historical tracked copies were removed from the active tree.
 ## 12. Historical Source Cleanup
 
 The disconnected agentic, W&B, NAS, multimodal-memory, and superseded
-meta-learning prototypes were removed before the `0.2.0` release. Git history
-retains them for research provenance without exposing their dependencies or
-generated model/index files in normal checkouts or distributions.
+meta-learning prototypes were removed before the `0.2.0` release and remain
+absent from `0.3.0`. Git history retains them for research provenance without
+exposing their dependencies or generated model/index files in normal checkouts
+or distributions.
 
 The active local meta-memory implementation is `autonexus/memory.py`; it uses
 the documented `~/.autonexus/memory/` runtime location and never relies on a
@@ -1004,51 +1110,46 @@ repository-committed FAISS index or neural checkpoint.
 | One-click deployment is process-local | Restarting Studio disables the endpoint and it is not a managed cloud deployment | The archive marks deployments inactive on restart; use container/managed deployment for durable production traffic. |
 | Firebase credentials are deployment-specific | Login cannot become active from source code alone | Configure Email/Password, public Web app values, and server-side Admin credentials before non-loopback launch. |
 | XLS parsing adds an old-format dependency | Extra base dependency for a legacy format | Drop XLS if only modern XLSX is required. |
+| Text, audio, video, and multimodal workflows are architecture only | Users could mistake diagrams for released support | Every roadmap path is marked not implemented; add loaders, splitters, predictors, analytics, optional dependencies, and acceptance tests before exposing it in the SDK or CLI. |
+| Docker and hosted deployment remain unverified | Source-level tests do not prove Railway persistence, Firebase ownership, Vercel CORS, browser uploads, or local-agent connectivity | Complete the deployment acceptance matrix in `DEPLOYMENT.md` before public hosted use. |
 
 ## 15. Production Readiness Assessment
 
-The runtime architecture is production-oriented for local and batch AutoML.
-Versions `0.1.0` and `0.1.1` are published on PyPI. The current source is the
-`0.2.0` feature line that adds a local-first Web Studio with optional Firebase
-identity and owner isolation over the public SDK.
+The `0.3.0` source, Git tag, wheel, and source distribution are released. Public
+PyPI metadata reports both `autonexus-0.3.0-py3-none-any.whl` and
+`autonexus-0.3.0.tar.gz`; the release workflow also completed clean-environment
+installation and command-level smoke checks. The package boundary remains
+isolated from historical prototypes and the root Apache-2.0 license is valid.
 
-Verification on 2026-08-04 produced this source status:
+The released local and batch runtime has automated coverage for framework
+lifecycle, mandatory artifacts, drift, local meta-memory, calibration,
+group-aware image splitting, backbone selection/fallback, executable notebook
+cells, Web input safety, Firebase owner scoping, BYOK redaction, SQLite-backed
+run persistence, and local-agent permission boundaries. Large pretrained model
+downloads and real cloud services are intentionally outside routine unit tests.
 
-- The source suite covers the production framework, notebook, splitting,
-  calibration, and Web control-plane contracts.
-- Framework lifecycle, drift, local memory, mandatory artifacts, grouped image
-  splitting, backbone selection/fallback logic, calibration, and executable
-  notebook tests passed.
-- Framework tests now cover both canonical-first and capitalized-first imports;
-  both expose the canonical `autonexus.api.AutoNexus` class on Windows.
-- Vision regressions reproduce the legacy object-array artifact safely, verify
-  metadata exists before completion is rendered, and normalize modern
-  Transformers pooling outputs returned by CLIP-family models.
-- The shared engine configures UTF-8-safe standard streams for both SDK and CLI
-  execution, preventing Windows CP1252 crashes in Unicode progress output.
-- Web tests cover upload path traversal rejection, Firebase authentication and
-  owner isolation, remote local-path denial, dataset inspection, typed mission
-  validation, atomic run persistence, multipart upload, background completion,
-  allowlisted artifact download, BYOK credential separation/redaction, and
-  post-run secret removal.
-- Headless Edge acceptance checks cover the overview, mission composer, fixed
-  header/deep-link behavior, desktop layout, and mobile navigation/layout.
+The following infrastructure gates remain open:
 
-Remaining `0.2.0` release gates, in order:
+1. Build `Dockerfile` locally and run its `/api/health`, persistence, upload,
+   artifact, restart, and resource-envelope checks against a mounted volume.
+2. Deploy one Railway backend with one `/data` volume and one worker; validate
+   interruption handling, storage growth, backups, quotas, and authenticated
+   owner isolation with at least two Firebase users.
+3. Deploy the static Vercel frontend; validate the final CORS origin, Firebase
+   authorized domain, desktop/mobile behavior, browser uploads, and artifact
+   downloads.
+4. Test the hosted-page-to-loopback agent path on supported browsers, including
+   Private Network Access prompts, invalid/expired pairing tokens, per-run GPU
+   denial, consent, cancellation, and local data retention.
+5. Run real tabular and image missions through local and Railway targets, then
+   verify reports, notebooks, SHAP evidence where applicable, deployments,
+   monitoring, and restart behavior end to end.
 
-1. Run the full source suite, including Web Studio lifecycle tests, and perform
-   manual desktop/mobile browser acceptance checks.
-2. Build fresh `0.2.0` wheel and source-distribution files and verify that all
-   packaged HTML, CSS, and JavaScript assets are present.
-3. Run `twine check`, install `AutoNexus[serve]` from the wheel into a clean
-   environment, and complete one browser-initiated tabular training mission.
-4. Publish the exact artifacts to TestPyPI and repeat Web, CLI, SDK, tabular,
-   and image smoke tests before production publication and tag `v0.2.0`.
-
-The package boundary remains isolated from historical prototypes and the root
-license is valid. The Studio supports trusted local use and Firebase-backed
-owner isolation; internet-facing multi-user hosting still requires durable
-queues, storage quotas, network controls, and isolated workers.
+Consequently, `0.3.0` is a published framework release, but the Vercel/Railway
+deployment should remain labelled pre-production until these environment-level
+checks pass. Multi-user SaaS operation additionally needs durable external job
+queues, per-user storage/compute quotas, isolated workers, rate limiting,
+backup/restore exercises, and operational alerting.
 
 ## 16. Summary
 
@@ -1070,6 +1171,7 @@ logistic control, validation-gated family diversity, early stopping, LoRA
 weight decay, and non-worsening temperature scaling.
 
 The production runtime is unified, and the old experimental stack has no
-runtime role in the declared distribution. Version `0.2.0` should be promoted
-only after the Web Studio and fresh-distribution verification gates in Section
-15 are complete.
+runtime role in the declared distribution. Version `0.3.0` is published; its
+local/package release gates are complete, while Docker and hosted deployment
+acceptance remain the next operational milestone. Text, audio, video, and
+multimodal fusion remain explicitly outside the released runtime.
