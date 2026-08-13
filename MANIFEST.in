@@ -1,0 +1,9 @@
+include .dockerignore
+include .env.example
+include DEPLOYMENT.md
+include Dockerfile
+include codes.md
+include railway.json
+include understanding.md
+include vercel.json
+recursive-include scripts *.py

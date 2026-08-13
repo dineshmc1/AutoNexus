@@ -1,0 +1,17 @@
+.git
+.github
+.venv
+__pycache__
+.pytest_cache
+artifacts
+build
+dist
+vercel-dist
+tests
+*.egg-info
+*.csv
+*.xls
+*.xlsx
+*.faiss
+*.pkl
+*.pt

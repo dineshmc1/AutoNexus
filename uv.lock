@@ -281,7 +281,7 @@ wheels = [
 
 [[package]]
 name = "autonexus"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "joblib" },
@@ -303,6 +303,7 @@ all = [
     { name = "faiss-cpu" },
     { name = "fastapi" },
     { name = "firebase-admin" },
+    { name = "google-cloud-storage" },
     { name = "kafka-python-ng" },
     { name = "lightgbm" },
     { name = "litellm" },
@@ -336,6 +337,10 @@ auth = [
 boosting = [
     { name = "lightgbm" },
     { name = "xgboost" },
+]
+cloud = [
+    { name = "firebase-admin" },
+    { name = "google-cloud-storage" },
 ]
 dev = [
     { name = "httpx" },
@@ -392,6 +397,9 @@ requires-dist = [
     { name = "fastapi", marker = "extra == 'serve'", specifier = ">=0.111" },
     { name = "firebase-admin", marker = "extra == 'all'", specifier = ">=6.5" },
     { name = "firebase-admin", marker = "extra == 'auth'", specifier = ">=6.5" },
+    { name = "firebase-admin", marker = "extra == 'cloud'", specifier = ">=6.5" },
+    { name = "google-cloud-storage", marker = "extra == 'all'", specifier = ">=2.16" },
+    { name = "google-cloud-storage", marker = "extra == 'cloud'", specifier = ">=2.16" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
     { name = "ipykernel", marker = "extra == 'analytics'", specifier = ">=6" },
     { name = "joblib", specifier = ">=1.2" },
@@ -455,7 +463,7 @@ requires-dist = [
     { name = "xgboost", marker = "extra == 'boosting'", specifier = ">=2" },
     { name = "xlrd", specifier = ">=2,<2.0.2" },
 ]
-provides-extras = ["boosting", "explain", "vision", "images", "llm", "memory", "monitoring", "auth", "serve", "streaming", "analytics", "dev", "all"]
+provides-extras = ["boosting", "explain", "vision", "images", "llm", "memory", "monitoring", "auth", "cloud", "serve", "streaming", "analytics", "dev", "all"]
 
 [[package]]
 name = "babel"

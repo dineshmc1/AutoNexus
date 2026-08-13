@@ -30,7 +30,12 @@ from autonexus.web import (
     create_app,
     inspect_dataset,
 )
-from autonexus.web_auth import FirebaseAuthenticator
+from autonexus.web_auth import (
+    AgentAuthenticator,
+    AuthenticationError,
+    FirebaseAuthenticator,
+)
+from autonexus.web_storage import FirebaseStorageMirror
 from autonexus.llm import LLMProvider
 from nexus_predictor import NexusPredictor
 
@@ -317,7 +322,16 @@ def test_run_manager_persists_completion_and_allowlists_artifacts(tmp_path):
         (manager.run_dir(run_id) / "web_run.json").read_text(encoding="utf-8")
     )
     assert persisted["status"] == "completed"
+    assert (manager.root / "studio.sqlite3").is_file()
     manager.shutdown()
+
+    recovered = RunManager(
+        tmp_path / "workspace",
+        trainer_factory=_FakeTrainer,
+    )
+    assert recovered.get(run_id)["best_model"] == "logistic"
+    assert recovered.get(run_id)["storage"]["metadata"] == "sqlite"
+    recovered.shutdown()
 
 
 def test_run_manager_never_persists_byok_key(tmp_path):
@@ -494,3 +508,119 @@ def test_firebase_auth_isolates_runs_and_disables_server_paths(tmp_path):
             f"/api/runs/{run_id}/artifacts/model", headers=bob
         ).status_code == 404
     manager.shutdown()
+
+
+def test_local_agent_requires_pairing_and_per_run_compute_consent(tmp_path):
+    fastapi_testclient = pytest.importorskip("fastapi.testclient")
+    token = "local-agent-pairing-token-value"
+    auth = AgentAuthenticator(token)
+    manager = RunManager(tmp_path / "agent-workspace", trainer_factory=_FakeTrainer)
+    app = create_app(
+        manager=manager,
+        authenticator=auth,
+        cors_origins=["https://studio.example"],
+    )
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Origin": "https://studio.example",
+    }
+    config = {
+        "preset": "fast",
+        "target": "label",
+        "llm": False,
+        "contribute_memory": False,
+        "execution_target": "local_agent",
+    }
+    csv_data = "feature,label\n0,no\n1,yes\n"
+
+    with pytest.raises(AuthenticationError):
+        auth.authenticate("Bearer wrong-token-value-that-is-long")
+
+    with fastapi_testclient.TestClient(app) as client:
+        preflight = client.options(
+            "/api/agent/capabilities",
+            headers={
+                "Origin": "https://studio.example",
+                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Private-Network": "true",
+            },
+        )
+        assert preflight.status_code == 200
+        assert preflight.headers["access-control-allow-private-network"] == "true"
+        capabilities = client.get("/api/agent/capabilities", headers=headers)
+        assert capabilities.status_code == 200
+        assert capabilities.json()["consent_required_for_every_run"]
+        assert capabilities.headers["access-control-allow-origin"] == (
+            "https://studio.example"
+        )
+
+        denied = client.post(
+            "/api/runs",
+            headers=headers,
+            data={"config": json.dumps(config)},
+            files={"files": ("data.csv", csv_data, "text/csv")},
+        )
+        assert denied.status_code == 400
+        assert "permission" in denied.json()["detail"].lower()
+
+        config["local_gpu_consent"] = True
+        accepted = client.post(
+            "/api/runs",
+            headers=headers,
+            data={"config": json.dumps(config)},
+            files={"files": ("data.csv", csv_data, "text/csv")},
+        )
+        assert accepted.status_code == 202, accepted.text
+        assert accepted.json()["config"]["execution_target"] == "local_agent"
+    manager.shutdown()
+
+
+def test_frontend_supports_remote_api_and_explicit_local_compute_permission():
+    script = Path("autonexus/web_static/app.js").read_text(encoding="utf-8")
+    page = Path("autonexus/web_static/index.html").read_text(encoding="utf-8")
+
+    assert "runtimeConfig.apiBaseUrl" in script
+    assert "local_gpu_consent" in script
+    assert "window.confirm" in script
+    assert "/api/agent/capabilities" in script
+    assert "LOCAL AGENT URL" in page
+    assert "/assets/config.js" in page
+
+
+def test_firebase_storage_mirror_keeps_compact_sqlite_metadata(tmp_path):
+    uploaded: list[tuple[str, Path]] = []
+
+    class FakeBlob:
+        def __init__(self, name):
+            self.name = name
+
+        def upload_from_filename(self, filename):
+            uploaded.append((self.name, Path(filename)))
+
+    class FakeBucket:
+        def blob(self, name):
+            return FakeBlob(name)
+
+    dataset = tmp_path / "dataset"
+    dataset.mkdir()
+    (dataset / "cats").mkdir()
+    (dataset / "cats" / "one.jpg").write_bytes(b"cat")
+    (dataset / "dogs").mkdir()
+    (dataset / "dogs" / "two.jpg").write_bytes(b"dogs")
+    mirror = object.__new__(FirebaseStorageMirror)
+    mirror.bucket_name = "project.firebasestorage.app"
+    mirror.prefix = "autonexus"
+    mirror._bucket = FakeBucket()
+    state = {
+        "id": "20260808-120000-abcdef",
+        "owner_id": "user@example.com",
+        "dataset": str(dataset),
+    }
+
+    result = mirror.mirror_dataset(state)
+
+    assert result["object_count"] == 2
+    assert result["size_bytes"] == 7
+    assert "objects" not in result
+    assert result["prefix"].startswith("gs://project.firebasestorage.app/")
+    assert {name.rsplit("/", 2)[-2] for name, _ in uploaded} == {"cats", "dogs"}

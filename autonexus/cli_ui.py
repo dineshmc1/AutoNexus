@@ -95,7 +95,7 @@ def render_banner(target: Console = console) -> None:
     target.print(
         Panel(
             Padding(identity, (1, 3)),
-            title=f"[nexus.cyan]AUTO NEXUS[/] [nexus.muted]// v0.2.0[/]",
+            title=f"[nexus.cyan]AUTO NEXUS[/] [nexus.muted]// v0.3.0[/]",
             subtitle="[nexus.muted]INTELLIGENCE, WITH EVIDENCE[/]",
             border_style=CYAN,
             box=box.HEAVY,

@@ -1,5 +1,8 @@
 "use strict";
 
+const runtimeConfig = Object.freeze(window.AUTO_NEXUS_CONFIG || {});
+const cloudApiBase = String(runtimeConfig.apiBaseUrl || "").trim().replace(/\/$/, "");
+
 const state = {
   source: "path",
   files: [],
@@ -24,6 +27,13 @@ const state = {
     hiddenCategories: new Set(),
   },
   evidenceUrls: [],
+  computeTarget: "cloud",
+  localAgent: {
+    url: "http://127.0.0.1:8788",
+    token: "",
+    connected: false,
+    capabilities: null,
+  },
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -83,18 +93,25 @@ function toast(message, tone = "info") {
   window.setTimeout(() => node.remove(), 4500);
 }
 
-async function api(url, options = {}) {
-  await refreshFirebaseToken();
+function apiUrl(path, target = state.computeTarget) {
+  if (/^https?:\/\//i.test(path)) return path;
+  const base = target === "local_agent" ? state.localAgent.url.replace(/\/$/, "") : cloudApiBase;
+  return `${base}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
+async function api(url, options = {}, target = state.computeTarget) {
+  if (target === "cloud") await refreshFirebaseToken();
   const headers = new Headers(options.headers || {});
-  if (state.auth.idToken) headers.set("Authorization", `Bearer ${state.auth.idToken}`);
-  const response = await fetch(url, { ...options, headers });
+  const token = target === "local_agent" ? state.localAgent.token : state.auth.idToken;
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  const response = await fetch(apiUrl(url, target), { ...options, headers });
   let payload = null;
   try {
     payload = await response.json();
   } catch (_) {
     payload = {};
   }
-  if (response.status === 401 && state.auth.config?.required) showAuthGate("Your session expired. Sign in again.");
+  if (response.status === 401 && target === "cloud" && state.auth.config?.required) showAuthGate("Your session expired. Sign in again.");
   if (!response.ok) throw new Error(payload.detail || `Request failed (${response.status})`);
   return payload;
 }
@@ -153,7 +170,7 @@ async function signIn(event) {
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error?.message || "Firebase sign-in failed.");
     persistFirebaseSession(payload);
-    state.auth.user = await api("/api/auth/me");
+    state.auth.user = await api("/api/auth/me", {}, "cloud");
     renderIdentity();
     hideAuthGate();
     $("#auth-password").value = "";
@@ -192,11 +209,11 @@ function renderIdentity() {
 function configureDatasetSources() {
   const pathButton = $('[data-source="path"]');
   const pathPane = $('[data-source-pane="path"]');
-  const allowed = state.auth.config?.local_paths_allowed !== false;
+  const allowed = state.computeTarget === "local_agent" || state.auth.config?.local_paths_allowed !== false;
   pathButton.disabled = !allowed;
   pathPane.querySelector("small").textContent = allowed
     ? "Use a CSV/Excel file or an image folder available to this machine."
-    : "Disabled for remote Firebase users; upload data through the browser.";
+    : "Cloud workers cannot read paths on your computer; use browser upload or pair the local agent.";
   if (!allowed && state.source === "path") {
     state.source = "upload";
     $$('.source-option').forEach((item) => item.classList.toggle("active", item.dataset.source === "upload"));
@@ -475,6 +492,54 @@ async function inspectPath() {
   }
 }
 
+function updateComputeControls() {
+  const local = state.computeTarget === "local_agent";
+  $("#local-agent-panel").hidden = !local;
+  $$(".compute-option").forEach((option) => {
+    option.classList.toggle("selected", option.querySelector("input").checked);
+  });
+  $("#compute-status").textContent = local
+    ? (state.localAgent.connected ? "LOCAL AGENT PAIRED" : "PAIRING REQUIRED")
+    : "RAILWAY CLOUD";
+  configureDatasetSources();
+  resetDatasetProfile();
+}
+
+async function connectLocalAgent() {
+  const button = $("#local-agent-connect");
+  const url = $("#local-agent-url").value.trim().replace(/\/$/, "");
+  const token = $("#local-agent-token").value.trim();
+  if (!/^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/i.test(url)) {
+    return toast("The local agent URL must use localhost or 127.0.0.1.", "error");
+  }
+  if (token.length < 20) return toast("Paste the full local-agent pairing token.", "error");
+  state.localAgent.url = url;
+  state.localAgent.token = token;
+  state.localAgent.connected = false;
+  button.disabled = true;
+  button.textContent = "PAIRING";
+  try {
+    const capabilities = await api("/api/agent/capabilities", {}, "local_agent");
+    state.localAgent.capabilities = capabilities;
+    state.localAgent.connected = true;
+    const gpu = capabilities.gpu?.available
+      ? `${capabilities.gpu.name} / ${capabilities.gpu.backend}`
+      : "CPU only; no supported GPU detected";
+    $("#local-agent-note").textContent = `Paired. ${gpu}. Data and metadata stay on this machine.`;
+    $("#local-agent-token").value = "";
+    updateComputeControls();
+    await refreshRuns();
+    toast(`Local agent paired. ${gpu}.`);
+  } catch (error) {
+    state.localAgent.token = "";
+    $("#local-agent-note").textContent = "Pairing failed. Check the agent, token, and allowed Vercel origin.";
+    toast(error.message, "error");
+  } finally {
+    button.disabled = false;
+    button.textContent = "PAIR AGENT";
+  }
+}
+
 function missionConfig() {
   const llmMode = $("#llm-mode").value;
   const llmProvider = $("#llm-provider").value;
@@ -502,6 +567,8 @@ function missionConfig() {
     },
     use_memory: $("#memory").checked,
     contribute_memory: $("#memory").checked,
+    execution_target: state.computeTarget,
+    local_gpu_consent: false,
   };
 }
 
@@ -548,8 +615,23 @@ function updateLLMControls() {
 async function submitMission(event) {
   event.preventDefault();
   const button = $("#launch-button");
+  const config = missionConfig();
+  if (state.computeTarget === "local_agent") {
+    if (!state.localAgent.connected || !state.localAgent.token) {
+      return toast("Pair the local agent before starting local training.", "error");
+    }
+    const gpu = state.localAgent.capabilities?.gpu;
+    const device = gpu?.available ? `${gpu.name} (${gpu.backend})` : "local CPU";
+    const permitted = window.confirm(
+      `Allow AutoNexus to train this mission on ${device}?\n\n` +
+      "The selected dataset and generated artifacts stay in the local agent workspace. " +
+      "Permission applies only to this run."
+    );
+    if (!permitted) return toast("Local compute permission was not granted.");
+    config.local_gpu_consent = true;
+  }
   const form = new FormData();
-  form.append("config", JSON.stringify(missionConfig()));
+  form.append("config", JSON.stringify(config));
   if (state.source === "path") {
     const path = $("#dataset-path").value.trim();
     if (!path) return toast("Enter and inspect a dataset path.", "error");
@@ -578,10 +660,11 @@ async function submitMission(event) {
 }
 
 async function authenticatedBlob(url) {
-  await refreshFirebaseToken();
+  if (state.computeTarget === "cloud") await refreshFirebaseToken();
   const headers = new Headers();
-  if (state.auth.idToken) headers.set("Authorization", `Bearer ${state.auth.idToken}`);
-  const response = await fetch(url, { headers });
+  const token = state.computeTarget === "local_agent" ? state.localAgent.token : state.auth.idToken;
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  const response = await fetch(apiUrl(url), { headers });
   if (!response.ok) {
     let detail = `Request failed (${response.status})`;
     try { detail = (await response.json()).detail || detail; } catch (_) { /* binary response */ }
@@ -610,13 +693,14 @@ async function downloadArtifact(runId, name) {
 
 async function loadDocuments() {
   try {
-    const payload = await fetch("/api/documents").then((response) => response.json());
+    const payload = await fetch(apiUrl("/api/documents", "cloud")).then((response) => response.json());
     $$('[data-document]').forEach((card) => {
       const item = payload.documents?.[card.dataset.document];
       card.classList.toggle("available", Boolean(item?.available));
       card.classList.toggle("unavailable", !item?.available);
       card.querySelector("small").textContent = item?.available ? "PDF ONLINE" : "AWAITING UPLOAD";
       card.setAttribute("aria-disabled", item?.available ? "false" : "true");
+      if (item?.available) card.href = apiUrl(item.url, "cloud");
     });
   } catch (_) {
     $$('[data-document]').forEach((card) => card.classList.add("unavailable"));
@@ -1118,6 +1202,12 @@ function bindEvents() {
   $("#inspect-button").addEventListener("click", inspectPath);
   $("#dataset-path").addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); inspectPath(); } });
   $("#dataset-path").addEventListener("input", resetDatasetProfile);
+  $$("input[name='compute-target']").forEach((input) => input.addEventListener("change", async () => {
+    state.computeTarget = input.value;
+    updateComputeControls();
+    if (state.computeTarget === "cloud") await refreshRuns();
+  }));
+  $("#local-agent-connect").addEventListener("click", connectLocalAgent);
   $("#file-input").addEventListener("change", (event) => profileFiles([...event.target.files]));
   $("#folder-input").addEventListener("change", (event) => profileFiles([...event.target.files]));
   const dropZone = $("#drop-zone");
@@ -1223,9 +1313,10 @@ function bindEvents() {
 async function boot() {
   bindEvents();
   updateLLMControls();
+  updateComputeControls();
   await loadDocuments();
   try {
-    state.auth.config = await fetch("/api/auth/config").then((response) => response.json());
+    state.auth.config = await fetch(apiUrl("/api/auth/config", "cloud")).then((response) => response.json());
     configureDatasetSources();
     if (state.auth.config.required) {
       try {
@@ -1235,11 +1326,11 @@ async function boot() {
       if (!state.auth.idToken) {
         showAuthGate();
       } else {
-        try { state.auth.user = await api("/api/auth/me"); hideAuthGate(); }
+        try { state.auth.user = await api("/api/auth/me", {}, "cloud"); hideAuthGate(); }
         catch (_) { signOut(); }
       }
     } else {
-      state.auth.user = await api("/api/auth/me");
+      state.auth.user = await api("/api/auth/me", {}, "cloud");
       hideAuthGate();
     }
     renderIdentity();
@@ -1249,7 +1340,7 @@ async function boot() {
   const initialView = location.hash.slice(1);
   if (["overview", "new-mission", "runs", "pipeline", "explain", "monitor", "audit"].includes(initialView)) navigate(initialView, false);
   try {
-    state.health = await api("/api/health");
+    state.health = await api("/api/health", {}, "cloud");
     $("#engine-chip").classList.add("online");
     $("#engine-label").textContent = "ENGINE ONLINE";
     $("#version-label").textContent = `v${state.health.version}`;

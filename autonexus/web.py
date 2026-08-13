@@ -30,6 +30,8 @@ from .web_auth import (
     StudioAuthenticator,
     authenticator_from_env,
 )
+from .web_storage import FirebaseStorageMirror
+from .web_store import SQLiteRunStore
 
 
 LOGGER = logging.getLogger("autonexus.web")
@@ -48,6 +50,7 @@ TABULAR_EXTENSIONS = {".csv", ".xlsx", ".xls"}
 VALID_TASKS = {"auto", "classification", "regression", "vision"}
 VALID_BACKBONES = {"auto", "clip", "dinov2", "resnet", "siglip"}
 VALID_LLM_MODES = {"offline", "environment", "byok", "ollama"}
+VALID_EXECUTION_TARGETS = {"cloud", "local_agent"}
 HOSTED_LLM_PROVIDERS = {
     "openai": "openai",
     "anthropic": "anthropic",
@@ -359,6 +362,9 @@ def _validate_config(
     llm_config, secrets_for_run = _validate_llm_config(
         config.get("llm_config", config.get("llm", True))
     )
+    execution_target = str(config.get("execution_target", "cloud")).strip()
+    if execution_target not in VALID_EXECUTION_TARGETS:
+        raise ConfigurationError("Invalid execution target.")
     normalized = {
         "preset": preset,
         "task": task,
@@ -376,6 +382,8 @@ def _validate_config(
         "preprocessing_cache": bool(config.get("preprocessing_cache", True)),
         "use_memory": bool(config.get("use_memory", True)),
         "contribute_memory": bool(config.get("contribute_memory", True)),
+        "execution_target": execution_target,
+        "local_gpu_consent": bool(config.get("local_gpu_consent", False)),
     }
     if not 0.05 <= normalized["test_size"] <= 0.4:
         raise ConfigurationError("test_size must be between 0.05 and 0.4.")
@@ -395,9 +403,14 @@ class RunManager:
         *,
         max_workers: int = 1,
         trainer_factory: Callable[..., Any] | None = None,
+        store: SQLiteRunStore | None = None,
+        blob_mirror: FirebaseStorageMirror | None = None,
     ) -> None:
         self.root = Path(root).expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True)
+        database_path = os.getenv("AUTONEXUS_WEB_DB") or self.root / "studio.sqlite3"
+        self.store = store or SQLiteRunStore(database_path)
+        self.blob_mirror = blob_mirror
         self._executor = ThreadPoolExecutor(
             max_workers=max_workers,
             thread_name_prefix="autonexus-web",
@@ -409,9 +422,15 @@ class RunManager:
         self._load_existing()
 
     def _load_existing(self) -> None:
+        loaded = {str(state["id"]): state for state in self.store.load_all()}
         for path in sorted(self.root.glob("*/web_run.json")):
             try:
                 state = json.loads(path.read_text(encoding="utf-8"))
+                loaded.setdefault(str(state["id"]), state)
+            except (OSError, ValueError, KeyError):
+                LOGGER.warning("Ignoring invalid web run state: %s", path)
+        for state in loaded.values():
+            try:
                 state.setdefault("owner_id", "local-user")
                 if state.get("status") in {"queued", "running"}:
                     state.update(
@@ -428,7 +447,7 @@ class RunManager:
                     self._persist(state)
                 self._runs[str(state["id"])] = state
             except (OSError, ValueError, KeyError):
-                LOGGER.warning("Ignoring invalid web run state: %s", path)
+                LOGGER.warning("Ignoring invalid stored web run state")
 
     def new_run_id(self) -> str:
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -445,14 +464,16 @@ class RunManager:
         return path
 
     def _persist(self, state: dict[str, Any]) -> None:
+        safe_state = _json_safe(state)
         path = self.run_dir(str(state["id"])) / "web_run.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_suffix(".tmp")
         temporary.write_text(
-            json.dumps(_json_safe(state), indent=2),
+            json.dumps(safe_state, indent=2),
             encoding="utf-8",
         )
         temporary.replace(path)
+        self.store.upsert(safe_state)
 
     def _update(self, run_id: str, **changes: Any) -> None:
         with self._lock:
@@ -489,6 +510,11 @@ class RunManager:
             "summary": {},
             "artifacts": [],
             "error": None,
+            "storage": {
+                "metadata": "sqlite",
+                "working_copy": "local_filesystem",
+                "firebase_mirror": None,
+            },
             "events": [
                 {"time": _utc_now(), "name": "queued", "message": "Run queued"}
             ],
@@ -520,6 +546,25 @@ class RunManager:
                 started_at=_utc_now(),
             )
             self._event(run_id, "training_started", "AutoNexus pipeline started")
+            if self.blob_mirror is not None:
+                try:
+                    mirrored_dataset = self.blob_mirror.mirror_dataset(state)
+                    storage = dict(state.get("storage", {}))
+                    storage["firebase_mirror"] = {"dataset": mirrored_dataset}
+                    self._update(run_id, storage=storage)
+                    self._event(
+                        run_id,
+                        "dataset_mirrored",
+                        "Dataset mirrored to Firebase Storage",
+                    )
+                except Exception as exc:
+                    LOGGER.warning("Dataset mirror failed for %s: %s", run_id, exc)
+                    storage = dict(state.get("storage", {}))
+                    storage["firebase_mirror"] = {
+                        "status": "failed",
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                    self._update(run_id, storage=storage)
 
             def callback(event: Any) -> None:
                 if event.name == "training_started":
@@ -577,6 +622,27 @@ class RunManager:
                 summary=manifest.get("run_summary", {}),
                 artifacts=artifacts,
             )
+            if self.blob_mirror is not None:
+                try:
+                    completed = self.get(run_id)
+                    mirrored_artifacts = self.blob_mirror.mirror_artifacts(completed)
+                    storage = dict(completed.get("storage", {}))
+                    firebase_mirror = dict(storage.get("firebase_mirror") or {})
+                    firebase_mirror["artifacts"] = mirrored_artifacts
+                    storage["firebase_mirror"] = firebase_mirror
+                    self._update(run_id, storage=storage)
+                    self._event(
+                        run_id,
+                        "artifacts_mirrored",
+                        "Artifacts mirrored to Firebase Storage",
+                    )
+                except Exception as exc:
+                    LOGGER.warning("Artifact mirror failed for %s: %s", run_id, exc)
+                    self._event(
+                        run_id,
+                        "artifact_mirror_failed",
+                        f"Firebase Storage mirror failed: {type(exc).__name__}",
+                    )
         except Exception as exc:
             LOGGER.exception("AutoNexus web run failed: %s", run_id)
             self._event(run_id, "failed", f"{type(exc).__name__}: {exc}")
@@ -1433,6 +1499,8 @@ def create_app(
     workspace: str | Path | None = None,
     manager: RunManager | None = None,
     authenticator: StudioAuthenticator | None = None,
+    cors_origins: list[str] | None = None,
+    blob_mirror: FirebaseStorageMirror | None = None,
 ) -> Any:
     """Create the optional FastAPI web application."""
     try:
@@ -1440,16 +1508,21 @@ def create_app(
 
         from fastapi import FastAPI, HTTPException, Request
         from fastapi.responses import FileResponse, JSONResponse
+        from fastapi.middleware.cors import CORSMiddleware
         from fastapi.staticfiles import StaticFiles
     except ImportError as exc:
         raise CapabilityError(
             'Web Studio requires: pip install "AutoNexus[serve]"'
         ) from exc
 
-    run_manager = manager or RunManager(
-        workspace or default_workspace()
-    )
     studio_auth = authenticator or authenticator_from_env()
+    if blob_mirror is None and manager is None:
+        blob_mirror = FirebaseStorageMirror.from_env()
+    run_manager = manager or RunManager(
+        workspace or default_workspace(),
+        max_workers=max(1, int(os.getenv("AUTONEXUS_WEB_WORKERS", "1"))),
+        blob_mirror=blob_mirror,
+    )
 
     @asynccontextmanager
     async def lifespan(_: Any):
@@ -1470,6 +1543,25 @@ def create_app(
     app.state.deployment_metrics = {}
     app.state.insights_cache = {}
 
+    configured_origins = cors_origins
+    if configured_origins is None:
+        configured_origins = [
+            value.strip().rstrip("/")
+            for value in os.getenv("AUTONEXUS_CORS_ORIGINS", "").split(",")
+            if value.strip()
+        ]
+    if configured_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=configured_origins,
+            allow_credentials=True,
+            allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+            allow_headers=["Authorization", "Content-Type"],
+            allow_private_network=studio_auth.mode == "agent",
+            expose_headers=["Content-Disposition"],
+            max_age=600,
+        )
+
     def remote_local_paths_allowed() -> bool:
         return (
             studio_auth.mode != "firebase"
@@ -1483,6 +1575,8 @@ def create_app(
     async def disable_studio_cache(request: Request, call_next):
         """Always serve the current Studio shell instead of stale browser assets."""
         response = await call_next(request)
+        if request.headers.get("access-control-request-private-network") == "true":
+            response.headers["Access-Control-Allow-Private-Network"] = "true"
         if request.url.path == "/" or request.url.path.startswith("/assets/"):
             response.headers["Cache-Control"] = (
                 "no-store, no-cache, must-revalidate, max-age=0"
@@ -1494,6 +1588,8 @@ def create_app(
     @app.middleware("http")
     async def authenticate_studio_request(request: Request, call_next):
         public_api = {"/api/health", "/api/auth/config", "/api/documents"}
+        if request.method == "OPTIONS":
+            return await call_next(request)
         if request.url.path.startswith("/api/") and request.url.path not in public_api:
             try:
                 request.state.principal = studio_auth.authenticate(
@@ -1546,6 +1642,9 @@ def create_app(
             "status": "online",
             "version": __version__,
             "auth_mode": studio_auth.mode,
+            "deployment": os.getenv("AUTONEXUS_DEPLOYMENT", "local"),
+            "persistence": "sqlite+filesystem",
+            "firebase_storage": run_manager.blob_mirror is not None,
         }
 
     @app.get("/api/auth/config")
@@ -1579,6 +1678,32 @@ def create_app(
                 "xgb_clf",
             ],
             "regression_models": [*REGRESSION_MODELS, "lgbm_reg", "xgb_reg"],
+            "execution_mode": studio_auth.mode,
+        }
+
+    @app.get("/api/agent/capabilities")
+    async def agent_capabilities():
+        if studio_auth.mode != "agent":
+            raise HTTPException(status_code=404, detail="Local agent is not enabled.")
+        gpu = {"available": False, "name": None, "backend": None}
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                gpu = {
+                    "available": True,
+                    "name": torch.cuda.get_device_name(0),
+                    "backend": "cuda",
+                }
+            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                gpu = {"available": True, "name": "Apple GPU", "backend": "mps"}
+        except ImportError:
+            pass
+        return {
+            "agent": "autonexus-local",
+            "gpu": gpu,
+            "consent_required_for_every_run": True,
+            "storage": "local_sqlite_and_filesystem",
         }
 
     @app.post("/api/datasets/inspect")
@@ -1972,6 +2097,19 @@ def create_app(
             config, secrets_for_run = _validate_config(
                 raw_config, profile["modality"]
             )
+            if studio_auth.mode == "agent":
+                if config["execution_target"] != "local_agent":
+                    raise ConfigurationError(
+                        "Local-agent missions must select local execution."
+                    )
+                if not config["local_gpu_consent"]:
+                    raise ConfigurationError(
+                        "Explicit local CPU/GPU permission is required for this mission."
+                    )
+            elif config["execution_target"] == "local_agent":
+                raise ConfigurationError(
+                    "Local execution must be submitted to a paired local agent."
+                )
             if profile["modality"] == "tabular" and config["target"] not in profile["columns"]:
                 raise ConfigurationError(
                     f"Target column not found: {config['target']}"

@@ -50,8 +50,12 @@ flowchart LR
     Engine --> Input{Input type}
     Input -->|CSV / Excel| Tabular[Tabular loader]
     Input -->|Directory| Vision[Grouped split and automatic backbone tournament]
+    Input -.->|planned text adapter| Text[Document audit, grouped split, language representation]
+    Input -.->|planned video adapter| Video[Video audit, source split, spatial-temporal representation]
     Tabular --> AutoML[Unified AutoML path]
     Vision --> AutoML
+    Text -.-> AutoML
+    Video -.-> AutoML
     AutoML --> Selection[Validation-only selection]
     Selection --> Test[One final held-out test]
     Test --> Artifacts[Model, metrics, manifest, reports]
@@ -64,6 +68,16 @@ baseline, local meta-memory, streaming source protocol, update gate, model
 registry, and optional inference server. W&B experiment tracking, autonomous
 agents, executable-file analysis, audio/video/text training, and neural
 architecture search are not production runtime features.
+
+Solid arrows in the diagram are implemented. Dashed arrows describe extension
+boundaries, not currently available training modes.
+
+| Modality | Current status | Production input boundary |
+|---|---|---|
+| Tabular | Implemented | CSV, XLSX, or XLS with an explicit target column |
+| Image | Implemented for classification | Class-named folders with explicit or automatic splits |
+| Text | Planned, not implemented | Requires a document/manifest loader, text-aware audit, grouped splitter, and representation registry |
+| Video | Planned, not implemented | Requires video decoding, clip sampling, source-aware splitting, and a spatial-temporal backbone registry |
 
 ## 3. Main Execution Path
 
@@ -124,7 +138,7 @@ library behavior from diverging.
 
 ```mermaid
 flowchart TD
-    A[Browser] --> Auth{Local loopback or Firebase ID token}
+    A[Browser or Vercel static Studio] --> Auth{Local loopback or Firebase ID token}
     Auth -->|verified principal| B{Dataset source}
     B -->|local mode or explicit admin override| C[Server-side path inspection]
     B -->|Browser upload| D[Sanitized isolated input directory]
@@ -134,10 +148,14 @@ flowchart TD
     F --> G[AutoNexus.fit]
     G --> H[main.run unified engine]
     H --> I[Persist model and evidence bundle]
-    I --> J[Persist web_run.json]
+    I --> J[Persist SQLite metadata plus local files]
+    J -. optional blob mirror .-> FB[Firebase Storage]
     J --> K[Live polling and run archive]
     K --> L[Owner-scoped artifacts, lineage, explanations, monitoring, audit]
     L --> M[Authenticated in-process deployment]
+    A -->|pairing token plus per-run consent| Agent[Loopback local agent]
+    Agent --> GPU[Local CPU or GPU]
+    Agent --> Local[(Local SQLite and files)]
 ```
 
 `autonexus/web.py` is a control plane, not a model-training implementation.
@@ -150,6 +168,13 @@ artifact, evidence image, deployment, monitoring request, and audit event by
 UID. Remote users are upload-only unless an administrator explicitly permits
 server-local paths. Runs default to the user's application-data directory, not
 the Git worktree.
+
+Hosted mode separates a static Vercel frontend from the Railway FastAPI control
+plane. Railway uses SQLite plus a mounted filesystem volume; Firebase Storage
+is an optional dataset/artifact mirror and Firestore is not used. A hosted page
+can request local compute only through a loopback-only paired agent. The agent
+uses an ephemeral token and rejects missions without explicit per-run CPU/GPU
+consent.
 
 The Studio now has seven operational views: overview, mission composer, run
 archive, interactive pipeline/data lineage with a 2D ledger, scientifically
@@ -236,6 +261,119 @@ stratification instead of inventing false groups. This reduces frame/session
 leakage when a dataset contains repeated video or subject observations. Cache
 keys are split-specific, so development and test embeddings cannot be
 accidentally combined through the cache.
+
+### 4.4 Planned Text Dataset Pipeline (Not Implemented)
+
+AutoNexus does not currently provide a semantic NLP pipeline. A text column in
+a tabular file is treated by the generic tabular preprocessor; that behavior is
+not equivalent to tokenization, language-model embeddings, transformer
+fine-tuning, or document-level explainability. A production text adapter should
+use the following boundary:
+
+```mermaid
+flowchart TD
+    A[CSV, JSONL, Parquet, or class-named document folders] --> B[Validate text, target, document ID, source, group, and timestamp]
+    B --> C[Audit empty, malformed, duplicate, near-duplicate, language, length, and sensitive text]
+    C --> D[Assign immutable document and provenance groups]
+    D --> E{Explicit train, validation, and test?}
+    E -->|yes| F[Honor source partitions and verify no group overlap]
+    E -->|no| G[Group-, source-, or time-aware split before vocabulary fitting]
+    F --> H[Development documents]
+    G --> H
+    F --> I[Untouched test documents]
+    G --> I
+    H --> J[Development-only representation tournament]
+    J --> K[TF-IDF linear landmark]
+    J --> L[Frozen language-model embeddings]
+    J --> M[Optional winner-only PEFT or LoRA candidate]
+    K --> N[Validation and cost gate]
+    L --> N
+    M --> N
+    N --> O[Freeze tokenizer, vocabulary, model revision, and representation]
+    O --> P[Unified downstream AutoML or validated end-to-end text head]
+    P --> Q[Calibration and validation-only selection]
+    Q --> R[Single held-out test evaluation]
+    R --> S[Predictor, audit, report, notebook, and manifest]
+```
+
+The split must happen before fitting a tokenizer vocabulary, TF-IDF statistics,
+target encoding, embedding reducer, or adapter. Exact and semantic duplicates,
+conversation threads, authors, customers, sources, and time windows should stay
+within one partition when their presence could leak context. The representation
+tournament should compare an inexpensive sparse linear landmark against frozen
+language embeddings; adaptation should be accepted only when a separate
+development gate improves generalization and probability quality after
+accounting for latency and memory.
+
+Text inference would restore the exact tokenizer and normalization contract,
+produce probabilities through the persisted calibration layer, and retain
+document IDs for monitoring. Text-specific analytics should include length and
+language distributions, duplicate/leakage evidence, token coverage, class-wise
+error slices, calibration, nearest semantic neighbors, and attribution methods
+that are valid for the selected representation.
+
+Implementing this path requires new text loader, splitter, audit, representation,
+inference, and notebook components; CLI/SDK modality selection; optional NLP
+dependencies; model-revision pinning; and dedicated tests. It must not be
+presented as supported until those pieces and real-dataset acceptance tests are
+complete.
+
+### 4.5 Planned Video Dataset Pipeline (Not Implemented)
+
+The current image grouping logic can recognize likely frame sequences to keep
+related images together, but AutoNexus does not decode video files or train a
+temporal model. Historical video FAISS files were prototype memory assets, not
+a production video pipeline. A safe video adapter should follow this workflow:
+
+```mermaid
+flowchart TD
+    A[Video files, class folders, or labelled manifest] --> B[Probe codec, duration, FPS, resolution, audio, corruption, and labels]
+    B --> C[Derive source, subject, session, camera, and original-video groups]
+    C --> D{Explicit train, validation, and test?}
+    D -->|yes| E[Honor partitions and reject cross-split group overlap]
+    D -->|no| F[Group- or time-aware split at video level]
+    E --> G[Development videos]
+    F --> G
+    E --> H[Untouched test videos]
+    F --> H
+    G --> I[Deterministic clip and frame sampler]
+    I --> J[Development-only backbone tournament]
+    J --> K[Frame encoder plus temporal pooling landmark]
+    J --> L[Native spatial-temporal video backbone]
+    J --> M[Optional motion or audio branch when explicitly enabled]
+    K --> N[Accuracy, NLL, latency, RAM, and VRAM gate]
+    L --> N
+    M --> N
+    N --> O[Optional winner-only LoRA or temporal adaptation]
+    O --> P[Frozen-versus-adapted development gate]
+    P --> Q[Freeze sampling policy and representation]
+    Q --> R[Extract clip/video embeddings for development and test separately]
+    R --> S[Unified downstream AutoML and calibration]
+    S --> T[Single held-out video-level test]
+    T --> U[Predictor, audit, report, notebook, and manifest]
+```
+
+The test boundary must be created at the original-video or source level before
+frames and clips are sampled. Splitting extracted frames independently would
+allow nearly identical neighboring frames into development and test and produce
+severely optimistic accuracy. Cache fingerprints must include the source-video
+hash, decoder version, sampling policy, clip timestamps, augmentation policy,
+backbone revision, and adapter digest.
+
+Video inference should sample clips with the persisted policy, aggregate
+frame/clip probabilities using a validated rule, and return both video-level
+predictions and temporal evidence. Analytics should cover corrupt media,
+duration/FPS/resolution distributions, class and source balance, sampled-frame
+grids, temporal confidence, confusing clips, embedding trajectories, and
+attention or saliency only where technically valid.
+
+Implementing this path requires a decoder backend, bounded streaming sampler,
+video-aware splitter, spatial-temporal model registry, cache schema, serialized
+video predictor, resource controls, analytics, and tests. GPU memory pressure
+and decoding throughput also require separate budgets from the image pipeline.
+Until those components exist, a folder of extracted frames can only use the
+image classifier and must retain reliable video groups; it is not equivalent to
+video understanding.
 
 ## 5. Image Backbone, Embedding, and LoRA Workflows
 
@@ -664,11 +802,15 @@ These are the modules explicitly included in the wheel by `pyproject.toml`.
 | `autonexus/plugins.py` | Registration points for custom estimators and extension factories. |
 | `autonexus/callbacks.py` | Failure-isolated lifecycle event callbacks. |
 | `autonexus/exceptions.py` | Stable framework-specific exception hierarchy. |
-| `autonexus/web.py` | FastAPI control plane, authenticated owner isolation, safe upload/path policy, background run queue, lineage/evidence APIs, monitoring, incremental updates, one-click local deployment, audit events, and allowlisted artifact delivery. |
-| `autonexus/web_auth.py` | Local-loopback identity and Firebase Admin ID-token verification boundary. |
+| `autonexus/web.py` | FastAPI control plane, CORS boundary, authenticated owner isolation, safe upload/path policy, SQLite-backed run queue, optional Firebase Storage mirroring, lineage/evidence APIs, monitoring, updates, deployment, audit events, and allowlisted artifact delivery. |
+| `autonexus/web_auth.py` | Local-loopback, paired-agent, and Firebase Admin ID-token verification boundary, including Railway service-account JSON loading. |
+| `autonexus/web_store.py` | Thread-safe SQLite run-state index stored locally or on the Railway persistent volume; no Firestore dependency. |
+| `autonexus/web_storage.py` | Optional owner/run-scoped Firebase Storage mirror for datasets and artifacts. |
+| `autonexus/railway.py` | Railway ASGI application entry point. |
+| `autonexus/local_agent.py` | Loopback-only local training agent with an ephemeral pairing token and trusted-origin allowlist. |
 | `autonexus/web_static/index.html` | Seven-view Studio structure with research-document slots, auth gate, mission composer, lineage, explainability, monitoring, updates, deployments, and audit history. |
 | `autonexus/web_static/styles.css` | Responsive visual system, motion, layout, form controls, mission cards, and accessible reduced-motion behavior. |
-| `autonexus/web_static/app.js` | Firebase login/session refresh, dataset selection, mission submission, polling, canvas lineage, and interactive model geometry with separate raw/projected coordinates, rotation, zoom, honest confidence tooltips, categorical filters, labelled axes, evidence downloads, monitoring, updates, deployment, and audit rendering. |
+| `autonexus/web_static/app.js` | Runtime-configured Railway routing, Firebase login/session refresh, cloud/local compute selection, explicit local GPU consent, dataset selection, mission submission, polling, canvas lineage, interactive model geometry, evidence downloads, monitoring, updates, deployment, and audit rendering. |
 
 ## 10. Important Project and Test Files
 
@@ -682,6 +824,9 @@ These are the modules explicitly included in the wheel by `pyproject.toml`.
 | `LICENSE` | Complete Apache-2.0 license text in the regular root file required by the distribution metadata. |
 | `.python-version` | Pins the local Python line to 3.12. |
 | `.env.example` | Safe template for LiteLLM, Studio workspace, remote-path policy, and Firebase public configuration; it contains no real secret. |
+| `DEPLOYMENT.md` | Exact Firebase Authentication/Storage, Railway volume, Vercel frontend, and paired local-agent deployment procedure. |
+| `Dockerfile`, `railway.json` | Reproducible Railway backend image, health check, and process policy. |
+| `vercel.json`, `scripts/build_vercel_frontend.py` | Static Vercel build and safe injection of the public Railway API base URL. |
 | `.gitignore` | Excludes datasets, secrets, environments, caches, builds, models, and run artifacts. |
 | `tests/test_data_loader.py` | Verifies split preservation, development-only ID filtering, and retention of legitimate predictive features. |
 | `tests/test_cli_calibration.py` | Verifies no-argument CLI parsing and that temperature scaling preserves predicted classes and normalized probabilities. |
@@ -853,7 +998,8 @@ repository-committed FAISS index or neural checkpoint.
 | Joblib model loading executes Python objects | Untrusted model files are unsafe | Load only artifacts produced by trusted runs. |
 | Firebase protects application-level ownership, not worker/OS isolation | A hostile workload could still compete for shared CPU, RAM, VRAM, or disk | Remote users are upload-only, all APIs are UID-scoped, and non-loopback launch requires Firebase; production SaaS still needs quotas and isolated workers. |
 | BYOK secrets live in process memory until a queued mission starts | A privileged process-memory inspector could access active credentials | Use a trusted local machine, keep the queue short, and use scoped/revocable provider keys. |
-| Web jobs execute in the application process | A process restart interrupts active work and Python threads cannot safely cancel model training | Mission state is persisted and interrupted work is surfaced; durable external queues are future deployment work. |
+| Railway jobs execute in the application process | A process restart interrupts active work and Python threads cannot safely cancel model training | SQLite and volume state survive restarts and interrupted work is surfaced; multi-replica production still needs a durable external queue. |
+| Local GPU access requires a browser-to-loopback connection | Private Network Access or corporate browser policy can block the hosted Studio from reaching localhost | Use a short-lived pairing token, an exact origin allowlist, per-run consent, and fall back to the local Studio when browser policy blocks loopback. |
 | Browser uploads duplicate input data inside the run workspace | Very large image folders can consume disk and transfer time | Prefer local-path mode for large datasets and enforce `AUTONEXUS_MAX_UPLOAD_MB`. |
 | One-click deployment is process-local | Restarting Studio disables the endpoint and it is not a managed cloud deployment | The archive marks deployments inactive on restart; use container/managed deployment for durable production traffic. |
 | Firebase credentials are deployment-specific | Login cannot become active from source code alone | Configure Email/Password, public Web app values, and server-side Admin credentials before non-loopback launch. |

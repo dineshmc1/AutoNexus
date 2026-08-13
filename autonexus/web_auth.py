@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import secrets
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -41,6 +43,35 @@ class StudioAuthenticator:
         }
 
 
+class AgentAuthenticator(StudioAuthenticator):
+    """Protect a loopback training agent with an ephemeral pairing token."""
+
+    mode = "agent"
+
+    def __init__(self, token: str) -> None:
+        if len(token) < 20:
+            raise ConfigurationError("The local-agent pairing token is too short.")
+        self._token = token
+
+    def authenticate(self, authorization: str | None) -> Principal:
+        scheme, _, token = (authorization or "").partition(" ")
+        if scheme.lower() != "bearer" or not secrets.compare_digest(
+            token, self._token
+        ):
+            raise AuthenticationError("A valid local-agent pairing token is required.")
+        return Principal(uid="local-agent-user", name="Paired local operator")
+
+    def public_config(self) -> dict[str, Any]:
+        return {
+            "mode": self.mode,
+            "required": True,
+            "firebase": None,
+            "warning": (
+                "Local training agent. Pair explicitly before granting GPU access."
+            ),
+        }
+
+
 class FirebaseAuthenticator(StudioAuthenticator):
     """Verify Firebase ID tokens and expose only non-secret client config."""
 
@@ -72,7 +103,7 @@ class FirebaseAuthenticator(StudioAuthenticator):
     ) -> Callable[[str], dict[str, Any]]:
         try:
             import firebase_admin
-            from firebase_admin import auth
+            from firebase_admin import auth, credentials
         except ImportError as exc:
             raise CapabilityError(
                 'Firebase login requires: pip install "AutoNexus[auth]"'
@@ -80,8 +111,32 @@ class FirebaseAuthenticator(StudioAuthenticator):
         try:
             app = firebase_admin.get_app()
         except ValueError:
+            raw_service_account = os.getenv(
+                "AUTONEXUS_FIREBASE_SERVICE_ACCOUNT_JSON", ""
+            ).strip()
+            credential = None
+            if raw_service_account:
+                try:
+                    service_account = json.loads(raw_service_account)
+                except json.JSONDecodeError as exc:
+                    raise ConfigurationError(
+                        "AUTONEXUS_FIREBASE_SERVICE_ACCOUNT_JSON is not valid JSON."
+                    ) from exc
+                credential = credentials.Certificate(service_account)
             app = firebase_admin.initialize_app(
-                options={"projectId": project_id}
+                credential=credential,
+                options={
+                    "projectId": project_id,
+                    **(
+                        {
+                            "storageBucket": os.environ[
+                                "AUTONEXUS_FIREBASE_STORAGE_BUCKET"
+                            ]
+                        }
+                        if os.getenv("AUTONEXUS_FIREBASE_STORAGE_BUCKET")
+                        else {}
+                    ),
+                },
             )
 
         def verify(token: str) -> dict[str, Any]:

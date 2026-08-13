@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "AutoNexus"
-version = "0.2.0"
+version = "0.3.0"
 authors = [
     { name = "Dinesh" },
 ]
@@ -58,6 +58,7 @@ llm = ["litellm>=1", "python-dotenv>=1"]
 memory = ["faiss-cpu>=1.8"]
 monitoring = ["prometheus-client>=0.20", "opentelemetry-api>=1.24"]
 auth = ["firebase-admin>=6.5"]
+cloud = ["firebase-admin>=6.5", "google-cloud-storage>=2.16"]
 serve = [
     "fastapi>=0.111",
     "litellm>=1",
@@ -71,6 +72,7 @@ all = [
     "faiss-cpu>=1.8",
     "fastapi>=0.111",
     "firebase-admin>=6.5",
+    "google-cloud-storage>=2.16",
     "kafka-python-ng>=2.2",
     "lightgbm>=4",
     "litellm>=1",
@@ -97,6 +99,7 @@ all = [
 ml-builder = "main:main"
 autonexus = "main:main"
 autonexus-web = "autonexus.web:main"
+autonexus-agent = "autonexus.local_agent:main"
 
 [tool.setuptools]
 py-modules = [

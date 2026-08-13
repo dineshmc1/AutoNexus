@@ -446,6 +446,14 @@ history, live status polling, generalization metrics, and allowlisted artifact
 downloads. Training remains inside `AutoNexus.fit`; the website does not
 maintain a separate ML pipeline.
 
+Hosted operation uses a hybrid boundary: Vercel serves the static Studio,
+Railway runs FastAPI on a persistent volume, Firebase Authentication provides
+identity, optional Firebase Storage mirrors blobs, and SQLite remains the run
+metadata database. Firestore is not used. Local GPU training is available only
+through a paired loopback agent with explicit permission for every run. See the
+[hybrid deployment guide](https://github.com/dineshmc1/AutoNexus/blob/main/DEPLOYMENT.md)
+for the complete procedure.
+
 Install and launch the single-user Studio:
 
 ```bash
@@ -764,11 +772,15 @@ AutoNexus/
 |   |-- monitoring.py          # Monitoring loop and sinks
 |   |-- memory.py              # Local FAISS/NumPy meta-memory
 |   |-- llm.py                 # LLM provider adapters
-|   |-- web_auth.py            # Local/Firebase identity verification
+|   |-- web_auth.py            # Local, agent, and Firebase identity boundary
+|   |-- web_store.py           # Local/Railway SQLite run metadata
+|   |-- web_storage.py         # Optional Firebase Storage blob mirror
+|   |-- local_agent.py         # Paired local CPU/GPU worker
+|   |-- railway.py             # Railway ASGI entry point
 |   |-- registry.py            # Version promotion and rollback
 |   |-- plugins.py             # Extension registry
 |   |-- callbacks.py           # Lifecycle events
-|   |-- web.py                 # Local web API and background run manager
+|   |-- web.py                 # Local/hosted API and background run manager
 |   `-- web_static/            # Packaged Studio frontend and PDF slots
 |-- main.py                    # CLI and unified orchestration engine
 |-- data_loader.py             # Tabular and image input boundaries
@@ -785,6 +797,11 @@ AutoNexus/
 |-- analytics_artifacts.py     # Audits and notebook data bundle
 |-- notebook_generator.py      # Executable analysis notebook
 |-- report_generator.py        # HTML reporting
+|-- scripts/                   # Static Vercel frontend build
+|-- Dockerfile                 # Railway backend image
+|-- railway.json               # Railway deployment policy
+|-- vercel.json                # Vercel static frontend policy
+|-- DEPLOYMENT.md              # Hybrid deployment and local-agent guide
 |-- llm_explainer.py           # LLM and offline Markdown reports
 |-- nexus_predictor.py         # Serializable inference boundary
 |-- tests/                     # Production test suite
