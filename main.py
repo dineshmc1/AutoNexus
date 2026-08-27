@@ -1153,6 +1153,50 @@ def _load_input(config: RunConfig) -> tuple[DataBundle, pd.DataFrame]:
     return bundle, raw_df
 
 
+def _clean_tabular_bundle(
+    bundle: DataBundle,
+) -> tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series]:
+    """Clean tabular splits while preserving row/group metadata alignment."""
+
+    def aligned(
+        values: pd.Series | None, keep: pd.Series, *, name: str
+    ) -> pd.Series | None:
+        if values is None:
+            return None
+        if len(values) != len(keep):
+            raise ValueError(
+                f"{name} has {len(values)} rows but its split has "
+                f"{len(keep)} rows."
+            )
+        positions = np.flatnonzero(keep.to_numpy())
+        return values.iloc[positions].reset_index(drop=True)
+
+    train_keep = ~bundle.X_train.duplicated()
+    test_keep = ~bundle.X_test.duplicated()
+    X_train, y_train = clean(bundle.X_train, bundle.y_train)
+    X_test, y_test = clean(
+        bundle.X_test, bundle.y_test, verbose=False
+    )
+
+    bundle.groups_train = aligned(
+        bundle.groups_train, train_keep, name="groups_train"
+    )
+    bundle.groups_test = aligned(
+        bundle.groups_test, test_keep, name="groups_test"
+    )
+    bundle.row_ids_train = aligned(
+        bundle.row_ids_train, train_keep, name="row_ids_train"
+    )
+    bundle.row_ids_test = aligned(
+        bundle.row_ids_test, test_keep, name="row_ids_test"
+    )
+    bundle.X_train = X_train.copy()
+    bundle.X_test = X_test.copy()
+    bundle.y_train = y_train.copy()
+    bundle.y_test = y_test.copy()
+    return X_train, y_train, X_test, y_test
+
+
 def render_run_completion(dashboard: dict[str, Any]) -> None:
     """Render completion only after every caller-owned finalizer succeeds."""
     phase(5, "Mission Complete", "validated model / sealed artifact bundle")
@@ -1193,10 +1237,7 @@ def run(
         X_test = bundle.X_test.copy()
         y_test = bundle.y_test.copy()
     else:
-        X_train, y_train = clean(bundle.X_train, bundle.y_train)
-        X_test, y_test = clean(
-            bundle.X_test, bundle.y_test, verbose=False
-        )
+        X_train, y_train, X_test, y_test = _clean_tabular_bundle(bundle)
     training_groups = (
         None
         if bundle.groups_train is None

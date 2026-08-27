@@ -5,8 +5,9 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from data_loader import load_dataset
+from data_loader import DataBundle, load_dataset
 from feature_processing import build_preprocessor
+from main import _clean_tabular_bundle
 
 
 def test_loader_splits_before_identifier_filtering(tmp_path):
@@ -60,3 +61,30 @@ def test_frequency_encoding_preserves_medium_cardinality_column():
 
     assert transformed.shape == (4, 2)
     assert np.isfinite(np.asarray(transformed)).all()
+
+
+def test_duplicate_cleaning_keeps_analytics_metadata_aligned():
+    bundle = DataBundle(
+        X_train=pd.DataFrame({"feature": [1, 1, 2]}),
+        X_test=pd.DataFrame({"feature": [3, 3, 4]}),
+        y_train=pd.Series([0, 0, 1], name="label"),
+        y_test=pd.Series([0, 0, 1], name="label"),
+        problem_type="classification",
+        feature_names=["feature"],
+        target_name="label",
+        groups_train=pd.Series(["a", "a", "b"]),
+        groups_test=pd.Series(["c", "c", "d"]),
+        row_ids_train=pd.Series(["train-0", "train-1", "train-2"]),
+        row_ids_test=pd.Series(["test-0", "test-1", "test-2"]),
+    )
+
+    X_train, y_train, X_test, y_test = _clean_tabular_bundle(bundle)
+
+    assert len(X_train) == len(y_train) == len(bundle.row_ids_train) == 2
+    assert len(X_test) == len(y_test) == len(bundle.row_ids_test) == 2
+    assert bundle.row_ids_train.tolist() == ["train-0", "train-2"]
+    assert bundle.row_ids_test.tolist() == ["test-0", "test-2"]
+    assert bundle.groups_train.tolist() == ["a", "b"]
+    assert bundle.groups_test.tolist() == ["c", "d"]
+    pd.testing.assert_frame_equal(bundle.X_train, X_train)
+    pd.testing.assert_frame_equal(bundle.X_test, X_test)

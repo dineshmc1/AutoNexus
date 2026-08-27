@@ -9,7 +9,7 @@ training engine:
 - `main.py`, `autonexus`, and `ml-builder` expose the same engine as a CLI.
 - `autonexus-web` launches the local Auto Nexus Studio for browser users.
 
-The current source declares version `0.3.0`, author `Dinesh`, and
+The current source declares version `0.3.1`, author `Dinesh`, and
 the SPDX license expression `Apache-2.0`. The canonical, cross-platform Python
 import is `from autonexus import AutoNexus`. The capitalized `import AutoNexus`
 compatibility path is also supported: package initialization aliases both
@@ -34,11 +34,15 @@ Every successful run has a strict artifact contract: `run.json`, `model.pkl`,
 The production distribution is explicitly declared in `pyproject.toml`.
 Historical W&B, agentic, NAS, and superseded meta-learning prototypes were
 removed from the active source tree and remain recoverable from Git history.
-Versions `0.1.0` through `0.3.0` are published on PyPI. Version `0.3.0` adds
-the hybrid Vercel/Railway boundary, Firebase-backed owner isolation, SQLite and
-filesystem persistence, and a permission-gated local CPU/GPU agent. The Docker
-image and hosted topology are implemented in source but have not yet completed
-deployment-specific acceptance testing.
+Versions `0.1.0` through `0.3.1` form the published release line. Version
+`0.3.0` added the hybrid Vercel/Railway boundary, Firebase-backed owner
+isolation, SQLite and filesystem persistence, and a permission-gated local
+CPU/GPU agent. Version `0.3.1` is a focused correctness patch: tabular duplicate
+cleaning now applies the same positional mask to targets, row identifiers, and
+optional split groups before analytics persistence. This prevents mismatched
+array lengths in `prediction_index.csv` and related notebook artifacts. The
+Docker image and hosted topology are implemented in source but have not yet
+completed deployment-specific acceptance testing.
 
 ## 2. System Boundary
 
@@ -379,7 +383,7 @@ augmentation policy, backbone revision, and adapter digest.
 Implementation requires an audio loader/decoder, streaming segment sampler,
 recording-aware splitter, acoustic backbone registry, aggregation and predictor
 contracts, resource controls, notebook sections, optional dependencies, and
-real-dataset tests. None of these components are shipped in `0.3.0`.
+real-dataset tests. None of these components are shipped in `0.3.1`.
 
 ### 4.6 Planned Video Dataset Pipeline (Not Implemented)
 
@@ -478,7 +482,7 @@ references and revisions, synchronized preprocessing, missing/late data policy,
 fusion weights or model, calibration, and lineage fingerprints. Drift monitoring
 must distinguish individual modality drift, alignment drift, availability drift,
 and final performance degradation. This architecture is a roadmap boundary only;
-`0.3.0` has no multimodal router or fusion estimator.
+`0.3.1` has no multimodal router or fusion estimator.
 
 ## 5. Image Backbone, Embedding, and LoRA Workflows
 
@@ -868,7 +872,7 @@ These are the modules explicitly included in the wheel by `pyproject.toml`.
 
 | File | Responsibility |
 |---|---|
-| `main.py` | CLI parser, prompting, image representation gate, tabular/image orchestration, test firewall, stage timing, artifacts, and terminal summary. |
+| `main.py` | CLI parser, prompting, image representation gate, tabular/image orchestration, duplicate-cleaning metadata alignment, test firewall, stage timing, artifacts, and terminal summary. |
 | `config.py` | Loads optional dotenv values and reads `LLM_MODEL` without embedding an invalid provider default. |
 | `data_loader.py` | Reads tabular files, validates targets, infers task type, encodes labels, performs stratified splitting, and drops development-inferred ID columns. |
 | `data_cleaner.py` | Removes duplicates, handles missing feature values conservatively, and preserves X/y alignment. |
@@ -921,7 +925,7 @@ These are the modules explicitly included in the wheel by `pyproject.toml`.
 
 | File | Meaning |
 |---|---|
-| `pyproject.toml` | Canonical `AutoNexus` `0.3.0` metadata, author, Apache-2.0 SPDX declaration, base/optional dependencies, CLI/Web/agent entrypoints, packaged static assets, explicit wheel module list, and pytest settings. |
+| `pyproject.toml` | Canonical `AutoNexus` `0.3.1` metadata, author, Apache-2.0 SPDX declaration, base/optional dependencies, CLI/Web/agent entrypoints, packaged static assets, explicit wheel module list, and pytest settings. |
 | `uv.lock` | Exact reproducible dependency resolution for base and optional extras. |
 | `README.md` | Publication-quality project overview with abstract, architecture, methodology, API/CLI usage, artifact contract, qualified case-study results, limitations, future work, references, and license status. |
 | `understanding.md` | This architecture and operational reference. |
@@ -933,7 +937,7 @@ These are the modules explicitly included in the wheel by `pyproject.toml`.
 | `Dockerfile`, `railway.json` | Reproducible Railway backend image, health check, and process policy. |
 | `vercel.json`, `scripts/build_vercel_frontend.py` | Static Vercel build and safe injection of the public Railway API base URL. |
 | `.gitignore` | Excludes datasets, secrets, environments, caches, builds, models, and run artifacts. |
-| `tests/test_data_loader.py` | Verifies split preservation, development-only ID filtering, and retention of legitimate predictive features. |
+| `tests/test_data_loader.py` | Verifies split preservation, development-only ID filtering, retention of legitimate predictive features, and row/group metadata alignment after duplicate cleaning. |
 | `tests/test_cli_calibration.py` | Verifies no-argument CLI parsing and that temperature scaling preserves predicted classes and normalized probabilities. |
 | `tests/test_image_splitting.py` | Verifies group isolation/CV, nested tournament samples, automatic backbone selection, CLIP fallback, LoRA probing, and ExtraTrees defaults without model downloads. |
 | `tests/test_notebook_analytics.py` | Verifies unreadable/duplicate image auditing, pre-training-first section order, code-cell syntax, persisted analysis artifacts, and end-to-end notebook-cell execution. |
@@ -982,7 +986,7 @@ historical tracked copies were removed from the active tree.
 
 The disconnected agentic, W&B, NAS, multimodal-memory, and superseded
 meta-learning prototypes were removed before the `0.2.0` release and remain
-absent from `0.3.0`. Git history retains them for research provenance without
+absent from `0.3.1`. Git history retains them for research provenance without
 exposing their dependencies or generated model/index files in normal checkouts
 or distributions.
 
@@ -1085,6 +1089,7 @@ repository-committed FAISS index or neural checkpoint.
 |---|---|---|
 | Capitalized compatibility requires early aliasing | Without package-name canonicalization, Windows can load duplicate classes under `AutoNexus.*` and `autonexus.*` | Both names are registered before canonical submodule imports; tests cover canonical-first and capitalized-first import order. |
 | Version `0.1.0` vision finalization can raise after successful training | Object-typed NPZ feature names are rejected by NumPy's safe loader, leaving framework and drift metadata incomplete | Version `0.1.1` writes Unicode arrays and safely recovers old bundles from the persisted predictor schema without enabling pickle. |
+| Duplicate cleaning can desynchronize analytics metadata | Removing repeated feature rows while retaining original row IDs or split groups makes pandas artifact construction fail with arrays of different lengths | Version `0.3.1` applies the duplicate mask consistently to features, targets, row IDs, and optional groups; a regression test covers both train and test splits. |
 | `--max-time` is cooperative | A single estimator fit can exceed the budget | Documented; hard isolation would require subprocess workers. |
 | Image models download on first use | Offline image runs fail without a local model cache | Actionable dependency/runtime error; pre-provision models in deployment. |
 | Backbone probes are approximate | A 10% or 30% ranking can eliminate a late-improving candidate | Nested stages retain three then two candidates; force an explicit list or one key when domain knowledge is stronger. |
@@ -1115,9 +1120,10 @@ repository-committed FAISS index or neural checkpoint.
 
 ## 15. Production Readiness Assessment
 
-The `0.3.0` source, Git tag, wheel, and source distribution are released. Public
-PyPI metadata reports both `autonexus-0.3.0-py3-none-any.whl` and
-`autonexus-0.3.0.tar.gz`; the release workflow also completed clean-environment
+The `0.3.1` source, Git tag, wheel, and source distribution define the current
+patch release. Its distribution artifacts are
+`autonexus-0.3.1-py3-none-any.whl` and `autonexus-0.3.1.tar.gz`; the release
+workflow includes clean-environment
 installation and command-level smoke checks. The package boundary remains
 isolated from historical prototypes and the root Apache-2.0 license is valid.
 
@@ -1145,7 +1151,7 @@ The following infrastructure gates remain open:
    verify reports, notebooks, SHAP evidence where applicable, deployments,
    monitoring, and restart behavior end to end.
 
-Consequently, `0.3.0` is a published framework release, but the Vercel/Railway
+Consequently, `0.3.1` is the current framework release, but the Vercel/Railway
 deployment should remain labelled pre-production until these environment-level
 checks pass. Multi-user SaaS operation additionally needs durable external job
 queues, per-user storage/compute quotas, isolated workers, rate limiting,
@@ -1171,7 +1177,7 @@ logistic control, validation-gated family diversity, early stopping, LoRA
 weight decay, and non-worsening temperature scaling.
 
 The production runtime is unified, and the old experimental stack has no
-runtime role in the declared distribution. Version `0.3.0` is published; its
+runtime role in the declared distribution. Version `0.3.1` is current; its
 local/package release gates are complete, while Docker and hosted deployment
 acceptance remain the next operational milestone. Text, audio, video, and
 multimodal fusion remain explicitly outside the released runtime.

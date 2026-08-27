@@ -16,12 +16,14 @@ model = AutoNexus(preset="balanced").fit("data.csv", target="label")
 predictions = model.predict("unseen.csv")
 ```
 
-> **Project status:** AutoNexus `0.3.0` is published on PyPI and tagged in this
-> repository. The packaged runtime supports tabular and image learning. Text,
-> audio, video, and cross-modal fusion are documented roadmap architectures,
-> not released training modes. The Docker image and hosted Vercel/Railway
-> topology still require deployment-specific acceptance testing before they
-> should be treated as production infrastructure.
+> **Project status:** AutoNexus `0.3.1` is the current patch release. It retains
+> the `0.3.0` feature scope and fixes analytics-artifact failures when tabular
+> duplicate removal changes split lengths by keeping targets, row identifiers,
+> and optional group metadata aligned. The packaged runtime supports tabular
+> and image learning. Text, audio, video, and cross-modal fusion are documented
+> roadmap architectures, not released training modes. The Docker image and
+> hosted Vercel/Railway topology still require deployment-specific acceptance
+> testing before they should be treated as production infrastructure.
 
 ## Contents
 
@@ -89,7 +91,7 @@ monitoring, gated incremental updates when the estimator supports
 
 ## Supported Scope
 
-| Modality | Status in `0.3.0` | Training input | Tasks | Target definition |
+| Modality | Status in `0.3.1` | Training input | Tasks | Target definition |
 |---|---|---|---|---|
 | Tabular | Implemented | `pandas.DataFrame`, CSV, XLSX, XLS | Classification and regression | Required target column |
 | Image | Implemented | Image folder hierarchy | Classification | Class-folder names |
@@ -122,7 +124,7 @@ disjoint; otherwise, the system uses a stratified image split.
 
 Audio, video, semantic text learning, multimodal fusion, executable-file
 analysis, neural architecture search, and distributed multi-node training are
-outside the packaged `0.3.0` runtime. Their diagrams below define safe extension
+outside the packaged `0.3.1` runtime. Their diagrams below define safe extension
 boundaries and do not imply callable SDK or CLI support.
 
 ## System Architecture
@@ -166,7 +168,7 @@ flowchart TB
     Update --> Registry
 ```
 
-Solid arrows represent released `0.3.0` paths. Dashed arrows are proposed
+Solid arrows represent released `0.3.1` paths. Dashed arrows are proposed
 extension contracts whose loaders, representations, predictors, analytics, and
 acceptance tests do not yet exist.
 
@@ -449,10 +451,10 @@ not require Torch, Transformers, FAISS, SHAP, an LLM client, or a web server.
 
 ### From PyPI
 
-Install the published `0.3.0` release:
+Install the published `0.3.1` release:
 
 ```bash
-pip install "AutoNexus==0.3.0"
+pip install "AutoNexus==0.3.1"
 ```
 
 Install only the capabilities required by the application:
@@ -1066,7 +1068,7 @@ third-party `fit`, model download, or active embedding batch.
 | Local filesystem registry | It is not a distributed model-governance service | Use external access control and artifact storage in production |
 | Pickle-compatible deployment | Untrusted artifacts are unsafe | Load trusted run bundles only |
 | Limited empirical evaluation | Two single-run image case studies cannot establish general superiority | Add repeated, controlled, multimodal benchmarks |
-| Text, audio, video, and multimodal adapters are architectural plans only | Their file formats, representations, predictors, analytics, and monitoring paths are unavailable in `0.3.0` | Implement and independently validate one modality at a time before advertising support |
+| Text, audio, video, and multimodal adapters are architectural plans only | Their file formats, representations, predictors, analytics, and monitoring paths are unavailable in `0.3.1` | Implement and independently validate one modality at a time before advertising support |
 | Hosted Docker/Vercel/Railway topology is not yet acceptance-tested in this release process | Local tests cannot establish cloud persistence, authentication, CORS, browser-to-loopback, or restart behavior | Complete the deployment checklist in `DEPLOYMENT.md` before public use |
 
 AutoNexus does not replace domain review, causal leakage analysis, fairness
@@ -1103,13 +1105,14 @@ Build and validate the distribution:
 
 ```bash
 uv build --no-sources
-uvx twine check dist/autonexus-0.3.0-py3-none-any.whl dist/autonexus-0.3.0.tar.gz
+uvx twine check dist/autonexus-0.3.1-py3-none-any.whl dist/autonexus-0.3.1.tar.gz
 ```
 
 The tests cover the public framework lifecycle, mandatory artifacts, drift,
-local meta-memory, calibration invariants, grouped image splitting, backbone
-selection/fallback logic, and execution of the generated notebook. Large
-pretrained models are not downloaded during the standard suite.
+local meta-memory, calibration invariants, duplicate-cleaning metadata
+alignment, grouped image splitting, backbone selection/fallback logic, and
+execution of the generated notebook. Large pretrained models are not
+downloaded during the standard suite.
 
 Contributions should preserve the test-set firewall, avoid importing optional
 heavy dependencies on the base tabular path, and include tests for public
