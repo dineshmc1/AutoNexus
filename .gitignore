@@ -32,6 +32,7 @@ temp_hf_datasets/
 wandb/
 *.log
 *.html
+!autonexus/web_static/index.html
 *.png
 *.pkl
 *.faiss

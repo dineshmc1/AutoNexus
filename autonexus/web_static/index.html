@@ -1,0 +1,530 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#06131d">
+  <meta name="description" content="Auto Nexus Studio - evidence-backed automated machine learning.">
+  <title>Auto Nexus Studio</title>
+  <link rel="stylesheet" href="/assets/styles.css?v=0.2.0-geometry1">
+</head>
+<body>
+  <section class="auth-gate" id="auth-gate" hidden aria-labelledby="auth-title">
+    <div class="auth-shell">
+      <span class="auth-signal">SECURE CONTROL PLANE</span>
+      <h1 id="auth-title">Enter Auto Nexus.</h1>
+      <p>Firebase identity isolates missions, artifacts, monitoring, and deployments by owner.</p>
+      <form id="auth-form">
+        <label class="field"><span>EMAIL</span><input id="auth-email" type="email" autocomplete="username" required></label>
+        <label class="field"><span>PASSWORD</span><input id="auth-password" type="password" autocomplete="current-password" required></label>
+        <button class="button primary" type="submit"><span>Authenticate</span><b>+</b></button>
+      </form>
+      <small id="auth-message">Use an account created in your Firebase Authentication project.</small>
+    </div>
+  </section>
+  <div class="ambient-grid" aria-hidden="true"></div>
+  <div class="ambient-glow glow-a" aria-hidden="true"></div>
+  <div class="ambient-glow glow-b" aria-hidden="true"></div>
+
+  <header class="topbar">
+    <a class="brand" href="#overview" data-navigate="overview" aria-label="Auto Nexus home">
+      <span class="brand-mark" aria-hidden="true">
+        <span></span><span></span><span></span>
+      </span>
+      <span class="brand-copy">
+        <strong>AUTO NEXUS</strong>
+        <small>MODEL OPERATIONS STUDIO</small>
+      </span>
+    </a>
+    <div class="topbar-center" aria-hidden="true">
+      <span>INGEST</span><i></i><span>SEARCH</span><i></i><span>VERIFY</span><i></i><span>SHIP</span>
+    </div>
+    <div class="topbar-actions">
+      <button class="identity-chip" id="identity-chip" type="button" hidden>
+        <span id="identity-label">LOCAL OPERATOR</span><b id="signout-label">SIGN OUT</b>
+      </button>
+      <div class="engine-chip" id="engine-chip">
+        <span class="pulse-dot"></span>
+        <span id="engine-label">CONNECTING</span>
+        <b id="version-label">v--</b>
+      </div>
+    </div>
+  </header>
+
+  <div class="shell">
+    <aside class="rail" aria-label="Primary navigation">
+      <nav>
+        <a class="rail-link active" href="#overview" data-view="overview">
+          <span class="rail-index">01</span><span>Overview</span>
+        </a>
+        <a class="rail-link" href="#new-mission" data-view="new-mission">
+          <span class="rail-index">02</span><span>New mission</span>
+        </a>
+        <a class="rail-link" href="#runs" data-view="runs">
+          <span class="rail-index">03</span><span>Run archive</span>
+        </a>
+        <a class="rail-link" href="#pipeline" data-view="pipeline">
+          <span class="rail-index">04</span><span>Lineage</span>
+        </a>
+        <a class="rail-link" href="#explain" data-view="explain">
+          <span class="rail-index">05</span><span>Explain</span>
+        </a>
+        <a class="rail-link" href="#monitor" data-view="monitor">
+          <span class="rail-index">06</span><span>Monitor</span>
+        </a>
+        <a class="rail-link" href="#audit" data-view="audit">
+          <span class="rail-index">07</span><span>Audit log</span>
+        </a>
+      </nav>
+      <div class="rail-foot">
+        <span id="auth-mode-label">LOCAL CONTROL PLANE</span>
+        <code id="auth-scope-label">127.0.0.1</code>
+      </div>
+    </aside>
+
+    <main>
+      <section class="view active" id="view-overview" data-view-panel="overview">
+        <div class="hero reveal">
+          <div class="hero-copy">
+            <p class="eyebrow"><span>ADAPTIVE MODEL SYSTEM</span> / EVIDENCE FIRST</p>
+            <h1>Turn raw data into a model you can <em>defend.</em></h1>
+            <p class="hero-lede">Auto Nexus searches, validates, calibrates, and packages production-ready machine learning with every decision preserved.</p>
+            <div class="hero-actions">
+              <button class="button primary" data-navigate="new-mission">
+                <span>Launch a mission</span><b aria-hidden="true">↗</b>
+              </button>
+              <button class="button ghost" data-navigate="runs">Explore run archive</button>
+            </div>
+          </div>
+          <div class="nexus-orbit" aria-hidden="true">
+            <div class="orbit orbit-one"><span></span></div>
+            <div class="orbit orbit-two"><span></span></div>
+            <div class="orbit orbit-three"><span></span></div>
+            <div class="nexus-core">
+              <small>NEXUS</small>
+              <strong>READY</strong>
+              <i></i>
+            </div>
+            <span class="orbit-label label-data">DATA</span>
+            <span class="orbit-label label-model">MODEL</span>
+            <span class="orbit-label label-proof">PROOF</span>
+          </div>
+        </div>
+
+        <section class="document-deck reveal" aria-labelledby="research-library-title">
+          <div class="document-intro">
+            <span class="kicker">RESEARCH LIBRARY</span>
+            <h2 id="research-library-title">The evidence behind the engine.</h2>
+            <p>Publication material is served directly from the installed Auto Nexus package.</p>
+          </div>
+          <a class="document-card" data-document="thesis" href="/documents/thesis" target="_blank">
+            <span>01 / THESIS</span><strong>Open thesis PDF</strong><small>Awaiting document</small>
+          </a>
+          <a class="document-card" data-document="research-paper" href="/documents/research-paper" target="_blank">
+            <span>02 / PAPER</span><strong>Open research paper</strong><small>Awaiting document</small>
+          </a>
+          <a class="document-card" data-document="framework-guide" href="/documents/framework-guide" target="_blank">
+            <span>03 / GUIDE</span><strong>Open framework guide</strong><small>Awaiting document</small>
+          </a>
+        </section>
+
+        <div class="metric-strip reveal delay-1">
+          <article><span>ENGINE</span><strong id="metric-engine">--</strong><small>control plane</small></article>
+          <article><span>MISSIONS</span><strong id="metric-runs">0</strong><small>persisted runs</small></article>
+          <article><span>ACTIVE</span><strong id="metric-active">0</strong><small>compute jobs</small></article>
+          <article><span>TOP TEST SCORE</span><strong id="metric-best">--</strong><small>recorded accuracy / R²</small></article>
+        </div>
+
+        <div class="overview-grid reveal delay-2">
+          <article class="panel system-map">
+            <div class="panel-heading">
+              <div><span class="kicker">SYSTEM MAP</span><h2>One pipeline. Full evidence.</h2></div>
+              <span class="live-tag"><i></i> ONLINE</span>
+            </div>
+            <div class="flow-map">
+              <div class="flow-node active"><b>01</b><span>Profile</span><small>quality + modality</small></div>
+              <div class="flow-line"><i></i></div>
+              <div class="flow-node"><b>02</b><span>Search</span><small>models + backbones</small></div>
+              <div class="flow-line"><i></i></div>
+              <div class="flow-node"><b>03</b><span>Verify</span><small>CV + held-out gate</small></div>
+              <div class="flow-line"><i></i></div>
+              <div class="flow-node"><b>04</b><span>Seal</span><small>model + analysis</small></div>
+            </div>
+          </article>
+
+          <article class="panel recent-panel">
+            <div class="panel-heading">
+              <div><span class="kicker">LATEST SIGNAL</span><h2>Recent missions</h2></div>
+              <button class="text-button" data-navigate="runs">VIEW ALL</button>
+            </div>
+            <div id="recent-runs" class="compact-runs empty-state">
+              <span class="empty-glyph">+</span>
+              <p>No missions recorded yet.</p>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section class="view" id="view-new-mission" data-view-panel="new-mission">
+        <div class="page-heading reveal">
+          <div><p class="eyebrow">MISSION COMPOSER / 02</p><h1>Configure the search.</h1></div>
+          <p>Choose the data and operational budget. Auto Nexus handles the rest.</p>
+        </div>
+
+        <form id="mission-form" class="composer-grid" novalidate>
+          <section class="panel composer-panel reveal delay-1">
+            <div class="section-number">01</div>
+            <div class="section-head">
+              <div><span class="kicker">INPUT MATRIX</span><h2>Connect your dataset</h2></div>
+              <span class="status-pill" id="dataset-status">NOT INSPECTED</span>
+            </div>
+
+            <div class="source-switch" role="tablist" aria-label="Dataset source">
+              <button type="button" class="source-option active" data-source="path">Local path</button>
+              <button type="button" class="source-option" data-source="upload">Browser upload</button>
+            </div>
+
+            <div class="source-pane active" data-source-pane="path">
+              <label class="field wide">
+                <span>DATASET PATH</span>
+                <div class="input-action">
+                  <input id="dataset-path" name="dataset_path" type="text" placeholder="C:\data\weather.csv or C:\data\images" autocomplete="off">
+                  <button id="inspect-button" class="mini-button" type="button">INSPECT</button>
+                </div>
+                <small>Use a CSV/Excel file or an image folder available to this machine.</small>
+              </label>
+            </div>
+
+            <div class="source-pane" data-source-pane="upload">
+              <div class="drop-zone" id="drop-zone" tabindex="0">
+                <div class="drop-symbol"><i></i><i></i></div>
+                <strong>Drop a tabular file here</strong>
+                <span>CSV, XLSX, XLS / maximum governed by server policy</span>
+                <div class="drop-actions">
+                  <label class="mini-button">CHOOSE FILE<input id="file-input" type="file" accept=".csv,.xlsx,.xls" hidden></label>
+                  <label class="mini-button muted">IMAGE FOLDER<input id="folder-input" type="file" webkitdirectory multiple hidden></label>
+                </div>
+              </div>
+              <div id="upload-summary" class="upload-summary">No files selected.</div>
+            </div>
+
+            <div id="dataset-dossier" class="dataset-dossier dormant">
+              <div><span>MODALITY</span><strong id="dossier-modality">--</strong></div>
+              <div><span>SCALE</span><strong id="dossier-scale">--</strong></div>
+              <div><span>FEATURES / CLASSES</span><strong id="dossier-shape">--</strong></div>
+              <div><span>DATA QUALITY</span><strong id="dossier-quality">PENDING</strong></div>
+            </div>
+          </section>
+
+          <section class="panel composer-panel reveal delay-2">
+            <div class="section-number">02</div>
+            <div class="section-head">
+              <div><span class="kicker">OBJECTIVE</span><h2>Define the mission</h2></div>
+            </div>
+            <div class="form-grid">
+              <label class="field">
+                <span>TARGET COLUMN</span>
+                <input id="target-column" name="target" type="text" list="target-options" placeholder="Required for tabular data">
+                <datalist id="target-options"></datalist>
+              </label>
+              <label class="field">
+                <span>PROBLEM TYPE</span>
+                <select id="task" name="task">
+                  <option value="auto">Auto detect</option>
+                  <option value="classification">Classification</option>
+                  <option value="regression">Regression</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>TEST HOLDOUT</span>
+                <div class="range-wrap"><input id="test-size" type="range" min="5" max="40" value="20"><output id="test-size-output">20%</output></div>
+              </label>
+              <label class="field">
+                <span>CROSS-VALIDATION</span>
+                <select id="cv" name="cv">
+                  <option value="2">2 folds</option>
+                  <option value="3">3 folds</option>
+                  <option value="5" selected>5 folds</option>
+                  <option value="10">10 folds</option>
+                </select>
+              </label>
+            </div>
+
+            <div class="compute-router">
+              <div class="compute-router-head">
+                <div><span class="kicker">COMPUTE BOUNDARY</span><h3>Choose where training executes</h3></div>
+                <span class="status-pill ready" id="compute-status">RAILWAY CLOUD</span>
+              </div>
+              <div class="compute-options" role="radiogroup" aria-label="Training location">
+                <label class="compute-option selected">
+                  <input type="radio" name="compute-target" value="cloud" checked>
+                  <b>Railway worker</b><small>Uploaded data is stored on the private Railway volume and optionally mirrored to Firebase Storage.</small>
+                </label>
+                <label class="compute-option">
+                  <input type="radio" name="compute-target" value="local_agent">
+                  <b>My local machine</b><small>Data stays local. A paired agent asks permission before every CPU/GPU training run.</small>
+                </label>
+              </div>
+              <div class="local-agent-panel" id="local-agent-panel" hidden>
+                <label class="field"><span>LOCAL AGENT URL</span><input id="local-agent-url" type="url" value="http://127.0.0.1:8788" spellcheck="false"></label>
+                <label class="field"><span>PAIRING TOKEN / MEMORY ONLY</span><input id="local-agent-token" type="password" autocomplete="off" spellcheck="false" placeholder="Paste the token printed by autonexus-agent"></label>
+                <button id="local-agent-connect" class="mini-button" type="button">PAIR AGENT</button>
+                <small id="local-agent-note">Run autonexus-agent locally and pair this browser session.</small>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel composer-panel full reveal delay-3">
+            <div class="section-number">03</div>
+            <div class="section-head">
+              <div><span class="kicker">SEARCH PROTOCOL</span><h2>Choose the operating profile</h2></div>
+              <button type="button" class="text-button" id="advanced-toggle" aria-expanded="true">LLM + ADVANCED CONTROLS -</button>
+            </div>
+
+            <div class="preset-grid" role="radiogroup" aria-label="Training preset">
+              <label class="preset-card">
+                <input type="radio" name="preset" value="fast">
+                <span class="preset-signal"></span><b>FAST</b><small>Rapid baseline<br>2-fold validation</small><em>01</em>
+              </label>
+              <label class="preset-card selected">
+                <input type="radio" name="preset" value="balanced" checked>
+                <span class="preset-signal"></span><b>BALANCED</b><small>Default search<br>evidence / cost balance</small><em>02</em>
+              </label>
+              <label class="preset-card">
+                <input type="radio" name="preset" value="accurate">
+                <span class="preset-signal"></span><b>ACCURATE</b><small>Deep search<br>tuning enabled</small><em>03</em>
+              </label>
+              <label class="preset-card">
+                <input type="radio" name="preset" value="low_memory">
+                <span class="preset-signal"></span><b>LOW MEMORY</b><small>Compact search<br>resource constrained</small><em>04</em>
+              </label>
+            </div>
+
+            <div class="advanced-controls open" id="advanced-controls">
+              <div class="form-grid">
+                <label class="field"><span>MODEL SHORTLIST</span><input id="models" type="text" placeholder="Auto, or logistic,et_clf,xgb_clf"></label>
+                <label class="field"><span>VISION BACKBONES</span><input id="backbones" type="text" value="auto" placeholder="auto, clip, dinov2, resnet, siglip"></label>
+                <label class="field"><span>MAX TRAINING TIME</span><input id="max-time" type="text" placeholder="Optional: 30m, 2h"></label>
+              </div>
+            </div>
+
+            <div class="llm-console">
+              <div class="llm-console-head">
+                <div>
+                  <span class="kicker">LLM INTELLIGENCE / BYOK</span>
+                  <h3>Choose who writes the model brief.</h3>
+                </div>
+                <span class="secret-badge" id="llm-security-badge"><i></i> SERVER ENV</span>
+              </div>
+              <p class="llm-note">The LLM writes only the final explanation. It cannot select models, tune parameters, or access raw training rows.</p>
+              <div class="llm-grid">
+                <label class="field">
+                  <span>CONNECTION MODE</span>
+                  <select id="llm-mode">
+                    <option value="environment" selected>Server environment</option>
+                    <option value="byok">Bring your own API key</option>
+                    <option value="ollama">Local Ollama</option>
+                    <option value="offline">Deterministic offline</option>
+                  </select>
+                </label>
+                <label class="field llm-conditional" id="llm-provider-field">
+                  <span>PROVIDER</span>
+                  <select id="llm-provider">
+                    <option value="openai">OpenAI</option>
+                    <option value="anthropic">Anthropic</option>
+                    <option value="gemini">Google Gemini</option>
+                    <option value="openrouter">OpenRouter</option>
+                    <option value="groq">Groq</option>
+                    <option value="mistral">Mistral AI</option>
+                    <option value="custom">Custom / OpenAI-compatible</option>
+                  </select>
+                </label>
+                <label class="field llm-conditional" id="llm-model-field">
+                  <span>MODEL IDENTIFIER</span>
+                  <input id="llm-model" type="text" placeholder="Enter the provider model ID" autocomplete="off" spellcheck="false">
+                </label>
+                <label class="field llm-conditional" id="llm-key-field">
+                  <span>API KEY / EPHEMERAL</span>
+                  <div class="input-action secure-input">
+                    <input id="llm-api-key" type="password" placeholder="Key is never written to disk" autocomplete="new-password" spellcheck="false">
+                    <button id="llm-key-toggle" class="mini-button" type="button">SHOW</button>
+                  </div>
+                </label>
+                <label class="field llm-conditional" id="llm-endpoint-field">
+                  <span>API ENDPOINT</span>
+                  <input id="llm-api-base" type="url" placeholder="https://provider.example/v1" autocomplete="off" spellcheck="false">
+                </label>
+              </div>
+              <div class="llm-privacy">
+                <span class="privacy-lock" aria-hidden="true"></span>
+                <p><strong id="llm-privacy-title">Server-managed credentials</strong><small id="llm-privacy-copy">Uses the provider configuration already present in the server environment.</small></p>
+              </div>
+            </div>
+
+            <div class="toggle-grid">
+              <label class="toggle"><input id="feature-engineering" type="checkbox"><span></span><b>Feature engineering</b><small>Adaptive interactions</small></label>
+              <label class="toggle"><input id="tune" type="checkbox"><span></span><b>Hyperparameter tuning</b><small>Search finalists</small></label>
+              <label class="toggle"><input id="adapt-lora" type="checkbox"><span></span><b>LoRA adaptation</b><small>Vision only</small></label>
+              <label class="toggle"><input id="shap" type="checkbox"><span></span><b>SHAP evidence</b><small>Explainability plots</small></label>
+              <label class="toggle"><input id="memory" type="checkbox" checked><span></span><b>Meta-memory</b><small>Contribute by default</small></label>
+            </div>
+          </section>
+
+          <div class="launch-bar reveal delay-3">
+            <div><span>READY STATE</span><strong id="launch-state">Awaiting dataset</strong></div>
+            <button class="button primary launch-button" id="launch-button" type="submit">
+              <span>Initialize training mission</span><b>↗</b>
+            </button>
+          </div>
+        </form>
+      </section>
+
+      <section class="view" id="view-runs" data-view-panel="runs">
+        <div class="page-heading reveal">
+          <div><p class="eyebrow">RUN ARCHIVE / 03</p><h1>Every decision, preserved.</h1></div>
+          <button class="button primary compact" data-navigate="new-mission">New mission <b>+</b></button>
+        </div>
+        <div class="archive-toolbar reveal delay-1">
+          <div class="archive-stat"><span>TOTAL RUNS</span><strong id="archive-total">0</strong></div>
+          <div class="archive-stat"><span>COMPLETED</span><strong id="archive-complete">0</strong></div>
+          <div class="archive-stat"><span>ACTIVE</span><strong id="archive-active">0</strong></div>
+          <label class="search-field"><span>⌕</span><input id="run-search" type="search" placeholder="Search model, dataset, or run ID"></label>
+        </div>
+        <div id="run-grid" class="run-grid reveal delay-2"></div>
+      </section>
+
+      <section class="view" id="view-pipeline" data-view-panel="pipeline">
+        <div class="page-heading reveal">
+          <div><p class="eyebrow">PIPELINE + DATA LINEAGE / 04</p><h1>See every handoff.</h1></div>
+          <p>The spatial graph is interactive. The ordered ledger below is the accessible two-dimensional equivalent.</p>
+        </div>
+        <div class="workbench-toolbar reveal delay-1">
+          <label class="field"><span>MISSION</span><select id="pipeline-run"></select></label>
+          <div><span>VIEW TRUTH</span><strong>Observed stages only</strong></div>
+        </div>
+        <section class="panel spatial-panel reveal delay-2">
+          <div class="panel-heading"><div><span class="kicker">INTERACTIVE 3D LINEAGE</span><h2 id="pipeline-title">Select a completed mission</h2></div><span class="drag-hint">DRAG TO ROTATE</span></div>
+          <canvas id="pipeline-canvas" class="spatial-canvas" width="1200" height="480" aria-label="Interactive three-dimensional model pipeline"></canvas>
+          <ol class="lineage-fallback" id="lineage-fallback" aria-label="Two-dimensional pipeline fallback"></ol>
+        </section>
+      </section>
+
+      <section class="view" id="view-explain" data-view-panel="explain">
+        <div class="page-heading reveal">
+          <div><p class="eyebrow">EXPLAINABILITY STUDIO / 05</p><h1>Interrogate the model.</h1></div>
+          <p>Exact geometry is shown only when mathematically valid. Every projection carries its own truth label.</p>
+        </div>
+        <div class="workbench-toolbar reveal delay-1">
+          <label class="field"><span>MISSION</span><select id="explain-run"></select></label>
+          <div><span>GEOMETRY MODE</span><strong id="geometry-mode">NO RUN SELECTED</strong></div>
+        </div>
+        <div class="explain-grid reveal delay-2">
+          <section class="panel spatial-panel geometry-panel">
+            <div class="panel-heading geometry-heading">
+              <div><span class="kicker">INTERACTIVE MODEL LANDSCAPE</span><h2 id="geometry-title">Representation map</h2></div>
+              <span class="drag-hint">DRAG / ZOOM / HOVER</span>
+            </div>
+            <div class="geometry-controls" aria-label="Geometry display controls">
+              <label><span>COLOR DOTS BY</span><select id="geometry-color"><option value="actual">Actual class</option><option value="predicted">Predicted class</option><option value="correctness">Correct / incorrect</option><option value="split">Dataset split</option><option value="confidence">Confidence</option></select></label>
+              <label><span>POINT SIZE</span><input id="geometry-point-size" type="range" min="70" max="180" value="110" step="10"></label>
+              <label class="geometry-check"><input id="geometry-surface" type="checkbox" checked><span>SHOW MODEL SURFACE</span></label>
+              <div class="geometry-view-buttons"><button class="mini-button" id="geometry-top" type="button">TOP VIEW</button><button class="mini-button" id="geometry-reset" type="button">RESET VIEW</button></div>
+            </div>
+            <div class="geometry-stage" id="geometry-stage">
+              <canvas id="geometry-canvas" class="spatial-canvas" width="900" height="560" aria-label="Interactive three-dimensional model response landscape" aria-describedby="geometry-truth"></canvas>
+              <div class="geometry-tooltip" id="geometry-tooltip" role="status" hidden></div>
+              <div class="geometry-orientation" aria-hidden="true"><span>X</span><span>Y</span><span>Z</span></div>
+            </div>
+            <div class="geometry-legend" id="geometry-legend" aria-label="Geometry color legend"></div>
+            <div class="geometry-reading-guide">
+              <article><span>DOTS</span><strong>Observed samples</strong><small>Hover for actual and predicted values.</small></article>
+              <article><span>HEIGHT</span><strong id="geometry-height-guide">Model output</strong><small>Higher is stronger response or confidence.</small></article>
+              <article><span>MESH</span><strong>Conditional model response</strong><small>Other inputs remain fixed at typical values.</small></article>
+            </div>
+            <div class="geometry-stats" id="geometry-stats"></div>
+            <p class="truth-label" id="geometry-truth">Select a completed mission to inspect its saved representation.</p>
+            <div class="geometry-notes" id="geometry-notes"></div>
+            <div class="warning-stack" id="insight-warnings"></div>
+          </section>
+          <aside class="panel evidence-console">
+            <span class="kicker">EVIDENCE CHANNELS</span>
+            <div class="evidence-status" id="evidence-status"></div>
+            <p id="local-explanation-note"></p>
+            <p id="attention-note"></p>
+            <div class="what-if-console">
+              <span class="kicker">CONSTRAINED WHAT-IF</span>
+              <textarea id="what-if-record" spellcheck="false" placeholder='{"feature_a": 1.2, "feature_b": "value"}'></textarea>
+              <button class="mini-button" id="what-if-button" type="button">EVALUATE ONE RECORD</button>
+              <pre id="what-if-result">No scenario evaluated.</pre>
+            </div>
+          </aside>
+        </div>
+        <div class="evidence-gallery reveal delay-3">
+          <figure class="panel"><figcaption>GLOBAL FEATURE IMPORTANCE</figcaption><div class="evidence-placeholder" id="feature-importance-empty">Not generated</div><img id="feature-importance-image" alt="Global feature importance" hidden></figure>
+          <figure class="panel"><figcaption>SHAP BEESWARM</figcaption><div class="evidence-placeholder" id="shap-summary-empty">Not generated</div><img id="shap-summary-image" alt="SHAP beeswarm plot" hidden></figure>
+          <figure class="panel"><figcaption>SHAP GLOBAL IMPORTANCE</figcaption><div class="evidence-placeholder" id="shap-importance-empty">Not generated</div><img id="shap-importance-image" alt="SHAP global importance plot" hidden></figure>
+          <figure class="panel"><figcaption>SHAP DEPENDENCE</figcaption><div class="evidence-placeholder" id="shap-dependence-empty">Not generated</div><img id="shap-dependence-image" alt="SHAP dependence plot" hidden></figure>
+          <figure class="panel"><figcaption>LOCAL WATERFALL</figcaption><div class="evidence-placeholder" id="shap-waterfall-empty">Not generated</div><img id="shap-waterfall-image" alt="SHAP local waterfall plot" hidden></figure>
+          <figure class="panel"><figcaption>CUMULATIVE DECISION</figcaption><div class="evidence-placeholder" id="shap-decision-empty">Not generated</div><img id="shap-decision-image" alt="SHAP cumulative decision plot" hidden></figure>
+        </div>
+      </section>
+
+      <section class="view" id="view-monitor" data-view-panel="monitor">
+        <div class="page-heading reveal">
+          <div><p class="eyebrow">LIVE MODEL HEALTH / 06</p><h1>Separate drift from decay.</h1></div>
+          <p>Submit production-shaped JSON records to compare schema, features, predictions, and labelled performance against the sealed baseline.</p>
+        </div>
+        <div class="workbench-toolbar reveal delay-1">
+          <label class="field"><span>DEPLOYED OR COMPLETED MISSION</span><select id="monitor-run"></select></label>
+          <button class="button ghost compact" id="refresh-monitor" type="button">Refresh telemetry</button>
+        </div>
+        <div class="monitor-grid reveal delay-2">
+          <section class="panel monitor-summary" id="monitor-summary"></section>
+          <section class="panel observe-console">
+            <span class="kicker">OBSERVE A BATCH</span>
+            <h2>Paste JSON records</h2>
+            <textarea id="monitor-records" spellcheck="false" placeholder='[{"feature_a": 1.2, "feature_b": "value", "label": 1}]'></textarea>
+            <button class="button primary compact" id="observe-button" type="button">Run drift check</button>
+            <pre id="monitor-result">No production batch observed in this session.</pre>
+          </section>
+        </div>
+        <section class="panel update-console reveal delay-3">
+          <div>
+            <span class="kicker">GATED INCREMENTAL LEARNING</span>
+            <h2>Challenge the live champion</h2>
+            <p>Only compatible estimators use <code>partial_fit</code>. Every candidate is saved as an immutable version and promoted only after strictly outperforming the champion on its unseen gate.</p>
+          </div>
+          <div>
+            <textarea id="incremental-records" spellcheck="false" placeholder='[{"feature_a": 1.2, "feature_b": "value", "label": 1}]'></textarea>
+            <button class="button primary compact" id="incremental-button" type="button">Evaluate incremental challenger</button>
+            <pre id="incremental-result">No incremental challenger evaluated.</pre>
+          </div>
+        </section>
+        <section class="panel telemetry-panel reveal delay-3"><div class="panel-heading"><div><span class="kicker">MONITORING EVENTS</span><h2>Drift and performance ledger</h2></div></div><div class="event-list" id="monitor-events"></div></section>
+      </section>
+
+      <section class="view" id="view-audit" data-view-panel="audit">
+        <div class="page-heading reveal">
+          <div><p class="eyebrow">OWNER-SCOPED AUDIT / 07</p><h1>Nothing happens silently.</h1></div>
+          <p>Only events belonging to the authenticated Firebase UID are returned by the server.</p>
+        </div>
+        <section class="panel audit-panel reveal delay-1">
+          <div class="panel-heading"><div><span class="kicker">LIFECYCLE LOG</span><h2>Training, evidence, monitoring, and deployment</h2></div><button class="text-button" id="refresh-audit" type="button">REFRESH</button></div>
+          <div class="audit-table" id="audit-table"></div>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="run-dialog" class="run-dialog">
+    <div class="dialog-shell">
+      <button class="dialog-close" id="dialog-close" aria-label="Close run details">×</button>
+      <div id="run-detail"></div>
+    </div>
+  </dialog>
+
+  <div class="toast-region" id="toast-region" aria-live="polite"></div>
+  <script src="/assets/config.js?v=0.2.0-hybrid1"></script>
+  <script src="/assets/app.js?v=0.2.0-hybrid1" defer></script>
+</body>
+</html>
